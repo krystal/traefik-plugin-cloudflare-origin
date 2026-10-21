@@ -820,8 +820,16 @@ locked mode with read-only permissions, as CI does, and its job summary names
 the Traefik and Yaegi versions it tested. It is not a required check, so a
 failure flags an incompatibility without blocking unrelated pull requests.
 
-To move the canary, run `mise run canary:use` for the newest Traefik 3.x
-release outside the cooldown, or pass a version, such as
+The `Traefik canary bump` workflow moves the canary forward. Every Monday, and
+on manual dispatch from `main`, it runs `mise run canary:use`. When that selects
+a newer Traefik release, it opens or updates a pull request from the
+`canary/traefik-bump` branch, where the canary workflow tests the new version.
+It authenticates with the release-please GitHub App from the `release`
+environment, so GitHub signs the commit as the App and the pull request
+triggers CI.
+
+To move the canary by hand, run `mise run canary:use` for the newest Traefik
+3.x release outside the cooldown, or pass a version, such as
 `mise run canary:use 3.7.15`. The task pins that Traefik and the Yaegi version
 built into it, and locks both for all three platforms. Commit
 `mise.canary.toml` and `mise.canary.lock` together. When the canary is green
@@ -841,10 +849,11 @@ version, and `feat` and `fix` commits bump the patch version.
 The release-please job runs last in CI, only after every other job passes on a
 push to `main` or a `release-X.Y.x` maintenance branch. It runs in the
 `release` environment and authenticates as a GitHub App, so its release pull
-requests trigger CI. It needs:
+requests trigger CI. The canary bump workflow uses the same environment and
+App. They need:
 
 - a GitHub App installed on this repository with read and write access to
-  contents, issues and pull requests, which the job requests when it creates
+  contents, issues and pull requests, which the jobs request when they create
   the App token; and
 - a `release` environment with a deployment branch policy that allows only
   `main` and `release-*.x`, the App's client ID in the
