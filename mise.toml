@@ -1,8 +1,64 @@
+[settings]
+# mise.lock pins exact versions and checksums; [tools] pins majors only.
+lockfile = true
+# Skip tool releases younger than three days.
+minimum_release_age = "3d"
+
 [tools]
-go = "1.26.9"
-golangci-lint = "2.15.0"
-"aqua:traefik/yaegi" = "0.16.1"
-"github:traefik/traefik" = "3.7.9"
+go = "1"
+golangci-lint = "2"
+actionlint = "1"
+pinact = "5"
+zizmor = "1"
+lefthook = "2"
+# Traefik and the Yaegi CLI are test targets. The e2e suite checks that the
+# Yaegi CLI matches the Yaegi version built into the Traefik binary.
+"aqua:traefik/yaegi" = "0"
+"github:traefik/traefik" = "3"
+
+[tasks.setup]
+description = "Install tools and the lefthook git hooks"
+run = ["mise install", "lefthook install"]
+
+[tasks.format]
+description = "Format Go code"
+run = "golangci-lint fmt"
+
+[tasks."format:check"]
+description = "Check Go formatting without changing files"
+run = "golangci-lint fmt --diff"
+
+[tasks."lint:go"]
+description = "Run golangci-lint"
+run = "golangci-lint run"
+
+[tasks."lint:actions"]
+description = "Check GitHub Actions workflows with actionlint"
+run = "actionlint"
+
+[tasks."lint:zizmor"]
+description = "Audit GitHub Actions workflows with zizmor, online when a GitHub token is set"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]]; then
+  zizmor .github
+else
+  zizmor --offline .github
+fi
+'''
+
+[tasks."lint:pinact"]
+description = "Check that GitHub Actions are SHA-pinned to releases at least three days old"
+run = "pinact run --check --verify-comment --min-age 3"
+
+[tasks."pin:actions"]
+description = "Pin GitHub Actions to full commit SHAs"
+run = "pinact run --min-age 3"
+
+[tasks.lint]
+description = "Run all linters"
+depends = ["lint:go", "lint:actions", "lint:zizmor", "lint:pinact"]
 
 [tasks.test]
 description = "Run unit tests with the Go toolchain"
@@ -21,14 +77,10 @@ cp .traefik.yml go.mod cloudflare_origin.go cloudflare_origin_test.go "$tmp/src/
 GOPATH="$tmp" GO111MODULE=off yaegi test -v "$import_path"
 '''
 
-[tasks.lint]
-description = "Run golangci-lint"
-run = "golangci-lint run"
-
 [tasks.e2e]
 description = "Run end-to-end tests against a real Traefik binary"
 run = "go test -tags e2e -count=1 -v ./e2e/"
 
 [tasks.check]
-description = "Run lint and unit tests under Go and Yaegi"
-depends = ["lint", "test", "test:yaegi"]
+description = "Run format checks, linters and unit tests under Go and Yaegi"
+depends = ["format:check", "lint", "test", "test:yaegi"]
