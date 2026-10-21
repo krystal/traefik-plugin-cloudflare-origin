@@ -54,9 +54,11 @@ var (
 //		dynamic: aliasConfig, // func(e *env) string
 //	})
 //
-// The shared configuration stays loaded beside the suite's, so the suite's
-// names must not collide with it, and the readiness probe still uses
-// open.test.
+// The shared configuration stays loaded beside the suite's: suite routers can
+// use its middlewares and the echo service, startTraefik fails if a suite
+// redefines one of its names, and the readiness probe still uses open.test.
+// Every entrypoint runs the shared cfo-entry instance, which protects
+// protected.test and both.test.
 type traefikOptions struct {
 	fastProxy bool
 	// underscoreHeadersStrategy sets http.underscoreHeadersStrategy on every
@@ -228,6 +230,12 @@ func startTraefik(t *testing.T, opts traefikOptions) *env {
 
 		log, exited, stop := runTraefik(t, bin, dir)
 		err := e.waitReady(exited)
+		// The file provider keeps the first definition of a duplicated name
+		// and only logs a warning.
+		if err == nil && strings.Contains(log.String(), "already configured, skipping") {
+			stop()
+			t.Fatalf("dynamic configuration defines a name twice\ntraefik log:\n%s", log.String())
+		}
 		if err == nil {
 			t.Cleanup(func() {
 				stop()
