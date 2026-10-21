@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"debug/buildinfo"
@@ -15,8 +14,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -39,6 +38,37 @@ var (
 	}
 )
 
+// traefikOptions configures one Traefik instance. The zero value runs the
+// shared fixture behind the standard proxy.
+//
+// A suite that needs its own routes or entrypoint settings starts its own
+// instance rather than editing the shared fixture. It keeps its routers,
+// middlewares, services and TLS options in its own file, returns them from
+// dynamic, lists any new hostnames in hosts, and calls startTraefik from its
+// test function:
+//
+//	e := startTraefik(t, traefikOptions{
+//		hosts:   []string{"alias.test"},
+//		dynamic: aliasConfig, // func(e *env) string
+//	})
+//
+// The shared configuration stays loaded beside the suite's: suite routers can
+// use its middlewares and the echo service, startTraefik fails if a suite
+// redefines one of its names, and the readiness probe still uses open.test.
+// Every entrypoint runs the shared cfo-entry instance, which protects
+// protected.test and both.test.
+type traefikOptions struct {
+	fastProxy bool
+	// underscoreHeadersStrategy sets http.underscoreHeadersStrategy on every
+	// entrypoint when not empty.
+	underscoreHeadersStrategy string
+	// hosts adds names to the server certificate.
+	hosts []string
+	// dynamic returns extra dynamic configuration for the file provider. It
+	// runs once the certificates and backend exist, so it can reference them.
+	dynamic func(e *env) string
+}
+
 // env is one running Traefik process plus the fixtures it was built from.
 type env struct {
 	certs     *fixtures
@@ -48,22 +78,14 @@ type env struct {
 	fastProxy bool
 }
 
-// syncBuffer collects Traefik's output while the process writes to it.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
+// traefikLog is the path of the file Traefik writes its output to. Traefik
+// writes the file directly rather than through a pipe, so anything it logged
+// before answering a request is readable once the response arrives.
+type traefikLog string
 
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
+func (l traefikLog) String() string {
+	data, _ := os.ReadFile(string(l))
+	return string(data)
 }
 
 func requireTraefikVersion(t *testing.T) string {
@@ -146,7 +168,7 @@ func freePort(t *testing.T, host string) string {
 	return ln.Addr().String()
 }
 
-func startTraefik(t *testing.T, fastProxy bool) *env {
+func startTraefik(t *testing.T, opts traefikOptions) *env {
 	t.Helper()
 	bin := requireTraefikVersion(t)
 
@@ -170,11 +192,18 @@ func startTraefik(t *testing.T, fastProxy bool) *env {
 	}
 
 	e := &env{
-		certs:     newFixtures(t, dir, routedHosts),
+		certs:     newFixtures(t, dir, slices.Concat(routedHosts, opts.hosts)),
 		backend:   newBackend(t),
-		fastProxy: fastProxy,
+		fastProxy: opts.fastProxy,
 	}
-	writeDynamicConfig(t, dir, e)
+	dynamicDir := filepath.Join(dir, "dynamic")
+	if err := os.Mkdir(dynamicDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeDynamicConfig(t, dynamicDir, e)
+	if opts.dynamic != nil {
+		writeFile(t, filepath.Join(dynamicDir, "suite.yml"), opts.dynamic(e))
+	}
 
 	withIPv6 := ipv6Available()
 	if !withIPv6 && os.Getenv("CI") != "" {
@@ -187,10 +216,16 @@ func startTraefik(t *testing.T, fastProxy bool) *env {
 		if withIPv6 {
 			e.addr6 = freePort(t, "::1")
 		}
-		writeStaticConfig(t, dir, e)
+		writeStaticConfig(t, dir, e, opts)
 
 		log, exited, stop := runTraefik(t, bin, dir)
 		err := e.waitReady(exited)
+		// The file provider keeps the first definition of a duplicated name
+		// and only logs a warning.
+		if err == nil && strings.Contains(log.String(), "already configured, skipping") {
+			stop()
+			t.Fatalf("dynamic configuration defines a name twice\ntraefik log:\n%s", log.String())
+		}
 		if err == nil {
 			t.Cleanup(func() {
 				stop()
@@ -209,14 +244,20 @@ func startTraefik(t *testing.T, fastProxy bool) *env {
 	}
 }
 
-func runTraefik(t *testing.T, bin, dir string) (*syncBuffer, <-chan struct{}, func()) {
+func runTraefik(t *testing.T, bin, dir string) (traefikLog, <-chan struct{}, func()) {
 	t.Helper()
-	log := &syncBuffer{}
+	log := traefikLog(filepath.Join(dir, "traefik.log"))
+	out, err := os.Create(string(log))
+	if err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command(bin, "--configFile="+filepath.Join(dir, "traefik.yml")) //nolint:gosec // Runs the traefik binary from PATH by design.
 	cmd.Dir = dir
-	cmd.Stdout = log
-	cmd.Stderr = log
-	if err := cmd.Start(); err != nil {
+	cmd.Stdout = out
+	cmd.Stderr = out
+	err = cmd.Start()
+	_ = out.Close()
+	if err != nil {
 		t.Fatalf("start traefik: %v", err)
 	}
 	exited := make(chan struct{})
@@ -293,7 +334,7 @@ func (e *env) probe(addr string) error {
 	return nil
 }
 
-func writeStaticConfig(t *testing.T, dir string, e *env) {
+func writeStaticConfig(t *testing.T, dir string, e *env, opts traefikOptions) {
 	t.Helper()
 	var b strings.Builder
 	b.WriteString(`global:
@@ -310,6 +351,9 @@ entryPoints:
       middlewares:
         - cfo-entry@file
 `, name, addr)
+		if opts.underscoreHeadersStrategy != "" {
+			fmt.Fprintf(&b, "      underscoreHeadersStrategy: %s\n", opts.underscoreHeadersStrategy)
+		}
 	}
 	entrypoint("v4", e.addr4)
 	if e.addr6 != "" {
@@ -320,21 +364,21 @@ entryPoints:
     cfo:
       moduleName: %s
 `, moduleName)
-	if e.fastProxy {
+	if opts.fastProxy {
 		// debug makes the fast proxy add X-Traefik-Fast-Proxy to backend
 		// requests, so tests can prove it handled them.
 		b.WriteString("  fastProxy:\n    debug: true\n")
 	}
 	fmt.Fprintf(&b, `providers:
   file:
-    filename: %q
-`, filepath.Join(dir, "dynamic.yml"))
+    directory: %q
+`, filepath.Join(dir, "dynamic"))
 	writeFile(t, filepath.Join(dir, "traefik.yml"), b.String())
 }
 
-// writeDynamicConfig declares one router per scenario. The entrypoint
-// instance pins the AOP CA; router-level instances vary the pin to exercise
-// chaining.
+// writeDynamicConfig writes the shared fixture, with one router per
+// scenario. The entrypoint instance pins the AOP CA; router-level instances
+// vary the pin to exercise chaining.
 func writeDynamicConfig(t *testing.T, dir string, e *env) {
 	t.Helper()
 	c := e.certs
@@ -448,7 +492,7 @@ tls:
 		"`strict.test`", "`same.test`", "`leaf.test`", "`reverse.test`",
 		e.backend.server.URL, c.serverCert, c.serverKey, c.aopCAFile, c.otherCAFile,
 	)
-	writeFile(t, filepath.Join(dir, "dynamic.yml"), config)
+	writeFile(t, filepath.Join(dir, "shared.yml"), config)
 }
 
 // assertProxy checks which Traefik proxy implementation forwarded a request.

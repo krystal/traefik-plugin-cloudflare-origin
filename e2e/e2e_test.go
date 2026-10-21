@@ -138,15 +138,20 @@ func assertRejected(t *testing.T, r result, status int) {
 	}
 }
 
-func TestTraefik(t *testing.T) {
-	e := startTraefik(t, false)
-	c := e.certs
+// traefikCase is one scenario against the shared fixture. Cases take the
+// env so that any of them can run under either proxy.
+type traefikCase struct {
+	name string
+	// fastProxy also runs the case under the fast proxy.
+	fastProxy bool
+	run       func(t *testing.T, e *env)
+}
 
-	t.Run("E1 verified rewrite replaces junk forwarding headers over HTTP/1.1", func(t *testing.T) {
-		testVerifiedRewriteHTTP1(t, e)
-	})
+var traefikCases = []traefikCase{
+	{name: "E1 verified rewrite replaces junk forwarding headers over HTTP/1.1", fastProxy: true, run: testVerifiedRewriteHTTP1},
 
-	t.Run("E2 verified IPv6 client value over HTTP/2", func(t *testing.T) {
+	{name: "E2 verified IPv6 client value over HTTP/2", run: func(t *testing.T, e *env) {
+		c := e.certs
 		r := e.do(t, call{
 			addr: e.addr4, host: "protected.test", cert: &c.cfLeaf, h2: true,
 			header: cf("2001:DB8:0::7"),
@@ -155,9 +160,10 @@ func TestTraefik(t *testing.T) {
 			t.Fatalf("protocol = HTTP/%d, want HTTP/2", r.proto)
 		}
 		assertDelivered(t, r, "2001:db8::7", "2001:db8::7", "2001:db8::7")
-	})
+	}},
 
-	t.Run("E3 resumed TLS session keeps verified chains", func(t *testing.T) {
+	{name: "E3 resumed TLS session keeps verified chains", run: func(t *testing.T, e *env) {
+		c := e.certs
 		sessions := tls.NewLRUClientSessionCache(4)
 		first := e.do(t, call{
 			addr: e.addr4, host: "protected.test", cert: &c.cfLeaf, sessions: sessions, header: cf(clientIP),
@@ -174,9 +180,10 @@ func TestTraefik(t *testing.T) {
 			t.Fatal("second connection did not resume the session")
 		}
 		assertDelivered(t, second, "203.0.113.8", "203.0.113.8", "203.0.113.8")
-	})
+	}},
 
-	t.Run("E4 client IP headers are stripped", func(t *testing.T) {
+	{name: "E4 client IP headers are stripped", run: func(t *testing.T, e *env) {
+		c := e.certs
 		spoofed := map[string]string{
 			"Cf-Connecting-Ip":   "192.0.2.10",
 			"True-Client-Ip":     "192.0.2.11",
@@ -212,9 +219,9 @@ func TestTraefik(t *testing.T) {
 			assertDelivered(t, r, "192.0.2.10", "192.0.2.10", "192.0.2.10")
 			assertStripped(t, r)
 		})
-	})
+	}},
 
-	t.Run("E5 protected host allows direct CIDR and denies other peers", func(t *testing.T) {
+	{name: "E5 protected host allows direct CIDR and denies other peers", run: func(t *testing.T, e *env) {
 		t.Run("IPv4 loopback denied", func(t *testing.T) {
 			r := e.do(t, call{addr: e.addr4, host: "protected.test", header: cf(loopbackV6)})
 			assertRejected(t, r, http.StatusForbidden)
@@ -227,9 +234,9 @@ func TestTraefik(t *testing.T) {
 			r := e.do(t, call{addr: e.addr6, host: "protected.test", header: cf(clientIP)})
 			assertDelivered(t, r, loopbackV6, loopbackV6, "")
 		})
-	})
+	}},
 
-	t.Run("E6 Host decides protection, not SNI", func(t *testing.T) {
+	{name: "E6 Host decides protection, not SNI", run: func(t *testing.T, e *env) {
 		t.Run("open SNI with protected Host", func(t *testing.T) {
 			r := e.do(t, call{addr: e.addr4, host: "protected.test", sni: "open.test"})
 			assertRejected(t, r, http.StatusForbidden)
@@ -238,9 +245,10 @@ func TestTraefik(t *testing.T) {
 			r := e.do(t, call{addr: e.addr4, host: "protected.test", sni: "other.test"})
 			assertRejected(t, r, http.StatusMisdirectedRequest)
 		})
-	})
+	}},
 
-	t.Run("E7 certificate from another client CA is not trusted", func(t *testing.T) {
+	{name: "E7 certificate from another client CA is not trusted", run: func(t *testing.T, e *env) {
+		c := e.certs
 		t.Run("open host under other TLS option is not rewritten", func(t *testing.T) {
 			r := e.do(t, call{addr: e.addr4, host: "other.test", cert: &c.otherLeaf, header: cf(clientIP)})
 			assertDelivered(t, r, loopbackV4, loopbackV4, "")
@@ -253,9 +261,10 @@ func TestTraefik(t *testing.T) {
 			r := e.do(t, call{addr: e.addr4, host: "both.test", cert: &c.cfLeaf, header: cf(clientIP)})
 			assertDelivered(t, r, clientIP, clientIP, clientIP)
 		})
-	})
+	}},
 
-	t.Run("E8 rogue CA certificate fails the handshake", func(t *testing.T) {
+	{name: "E8 rogue CA certificate fails the handshake", run: func(t *testing.T, e *env) {
+		c := e.certs
 		r, err := e.try(call{addr: e.addr4, host: "protected.test", forceCert: &c.rogueLeaf, header: cf(clientIP)})
 		if err == nil {
 			t.Fatalf("got HTTP %d, want a TLS error", r.status)
@@ -263,9 +272,10 @@ func TestTraefik(t *testing.T) {
 		if !strings.Contains(err.Error(), "tls: ") {
 			t.Fatalf("error = %v, want a TLS alert", err)
 		}
-	})
+	}},
 
-	t.Run("E9 ipAllowList sees the restored IP", func(t *testing.T) {
+	{name: "E9 ipAllowList sees the restored IP", run: func(t *testing.T, e *env) {
+		c := e.certs
 		t.Run("restored IP in range", func(t *testing.T) {
 			r := e.do(t, call{addr: e.addr4, host: "allow.test", cert: &c.cfLeaf, header: cf(clientIP)})
 			assertDelivered(t, r, clientIP, clientIP, clientIP)
@@ -278,22 +288,22 @@ func TestTraefik(t *testing.T) {
 			r := e.do(t, call{addr: e.addr4, host: "allow.test", header: cf(clientIP)})
 			assertRejected(t, r, http.StatusForbidden)
 		})
-	})
+	}},
 
-	t.Run("E10 verified rewrite from an IPv6 peer", func(t *testing.T) {
+	{name: "E10 verified rewrite from an IPv6 peer", run: func(t *testing.T, e *env) {
+		c := e.certs
 		e.requireIPv6(t)
 		r := e.do(t, call{addr: e.addr6, host: "open.test", cert: &c.cfLeaf, header: cf(clientIP)})
 		assertDelivered(t, r, clientIP, clientIP, clientIP)
 
 		r = e.do(t, call{addr: e.addr6, host: "open.test", header: cf(clientIP)})
 		assertDelivered(t, r, loopbackV6, loopbackV6, "")
-	})
+	}},
 
-	t.Run("E11 WebSocket upgrade", func(t *testing.T) {
-		testWebSocket(t, e)
-	})
+	{name: "E11 WebSocket upgrade", fastProxy: true, run: testWebSocket},
 
-	t.Run("E12 chained instances", func(t *testing.T) {
+	{name: "E12 chained instances", run: func(t *testing.T, e *env) {
+		c := e.certs
 		t.Run("identical pins rewrite once", func(t *testing.T) {
 			r := e.do(t, call{addr: e.addr4, host: "same.test", cert: &c.cfLeaf, header: cf(clientIP)})
 			assertDelivered(t, r, clientIP, clientIP, clientIP)
@@ -319,9 +329,10 @@ func TestTraefik(t *testing.T) {
 			r := e.do(t, call{addr: e.addr4, host: "reverse.test", cert: &c.otherLeaf, header: cf(clientIP)})
 			assertDelivered(t, r, clientIP, clientIP, clientIP)
 		})
-	})
+	}},
 
-	t.Run("E13 allowMissingClientIP default and explicit false", func(t *testing.T) {
+	{name: "E13 allowMissingClientIP default and explicit false", run: func(t *testing.T, e *env) {
+		c := e.certs
 		t.Run("default passes verified request with edge IP", func(t *testing.T) {
 			r := e.do(t, call{addr: e.addr4, host: "open.test", cert: &c.cfLeaf})
 			assertDelivered(t, r, loopbackV4, loopbackV4, "")
@@ -334,18 +345,23 @@ func TestTraefik(t *testing.T) {
 			r := e.do(t, call{addr: e.addr4, host: "strict.test", cert: &c.cfLeaf, header: cf(clientIP)})
 			assertDelivered(t, r, clientIP, clientIP, clientIP)
 		})
-	})
+	}},
+}
+
+func TestTraefik(t *testing.T) {
+	e := startTraefik(t, traefikOptions{})
+	for _, tc := range traefikCases {
+		t.Run(tc.name, func(t *testing.T) { tc.run(t, e) })
+	}
 }
 
 func TestTraefikFastProxy(t *testing.T) {
-	e := startTraefik(t, true)
-
-	t.Run("E1 verified rewrite replaces junk forwarding headers over HTTP/1.1", func(t *testing.T) {
-		testVerifiedRewriteHTTP1(t, e)
-	})
-	t.Run("E11 WebSocket upgrade", func(t *testing.T) {
-		testWebSocket(t, e)
-	})
+	e := startTraefik(t, traefikOptions{fastProxy: true})
+	for _, tc := range traefikCases {
+		if tc.fastProxy {
+			t.Run(tc.name, func(t *testing.T) { tc.run(t, e) })
+		}
+	}
 }
 
 func testVerifiedRewriteHTTP1(t *testing.T, e *env) {
