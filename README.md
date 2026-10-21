@@ -78,6 +78,33 @@ Two pieces of Traefik configuration work together:
 - The plugin's **Middleware** inspects the verified certificate. You attach it
   to an IngressRoute (router level) or to an entrypoint (every router on it).
 
+For a protected host, such as the one in [example 1](#1-gate-one-service),
+each kind of caller ends up like this. Allowlisted sources are the addresses
+in `directAccessCIDRs`.
+
+```mermaid
+flowchart TB
+  CF["Cloudflare edge<br/>with your AOP cert"]
+  DA["Your allowlisted<br/>sources"]
+  X["Everyone else"]
+
+  subgraph traefik["Traefik"]
+    direction TB
+    TLS["TLSOption<br/>verifies client certs"] --> MW["cloudflare-origin"]
+  end
+
+  CF -- "mTLS +<br/>Cf-Connecting-Ip" --> TLS
+  DA -- "TLS, no cert" --> TLS
+  X -- "no pinned cert" --> TLS
+
+  MW -- "pin matches:<br/>trust Cf-Connecting-Ip" --> V(["Backend sees<br/>the visitor IP"])
+  MW -- "peer allowlisted:<br/>no rewrite" --> S(["Backend sees<br/>the source IP"])
+  MW -- "neither" --> F[["403 Forbidden"]]
+```
+
+On a host that isn't protected, everyone else passes through instead, and the
+backend sees their TCP source IP.
+
 For each request, the plugin:
 
 1. Records the original remote address, `Cf-Connecting-Ip` and `X-Real-Ip`
