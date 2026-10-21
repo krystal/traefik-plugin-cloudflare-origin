@@ -1,0 +1,53 @@
+name: Traefik canary
+
+# Runs the full e2e suite against the Traefik and Yaegi versions pinned in
+# mise.canary.toml and mise.canary.lock. It is not a required check: the
+# baseline in mise.lock, tested by ci.yml, stays the supported version.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  # Lets a pull request that changes the canary test it.
+  pull_request:
+    paths:
+      - mise.canary.toml
+      - mise.canary.lock
+      - .github/workflows/canary.yml
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Install exactly what mise.lock and mise.canary.lock record.
+  MISE_LOCKED: "1"
+  MISE_ENV: canary
+
+jobs:
+  e2e:
+    name: End-to-end tests (canary)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          github_token: ${{ github.token }}
+          # Apply the project's three-day cooldown to mise itself.
+          minimum_release_age: 3d
+      - name: Record tested versions
+        run: |
+          {
+            echo "## Traefik canary"
+            echo
+            echo '```'
+            mise exec -- traefik version
+            echo "Yaegi CLI: $(mise exec -- yaegi version)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - run: mise run e2e

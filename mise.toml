@@ -81,6 +81,35 @@ GOPATH="$tmp" GO111MODULE=off yaegi test -v "$import_path"
 description = "Run end-to-end tests against a real Traefik binary"
 run = "go test -tags e2e -count=1 -v ./e2e/"
 
+[tasks."e2e:canary"]
+description = "Run end-to-end tests against the canary Traefik and Yaegi in mise.canary.toml"
+run = "mise --env canary run e2e"
+
+[tasks."canary:use"]
+description = "Pin the canary to a Traefik release and its embedded Yaegi, and lock both"
+usage = '''
+arg "[version]" default="3" help="Traefik version or prefix; the default is the newest 3.x release outside the cooldown"
+'''
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+# mise latest honours the cooldown, so it also rejects exact versions inside it.
+version="$(mise latest "github:traefik/traefik@${usage_version#v}")"
+if [[ -z "$version" ]]; then
+  echo "no traefik release matches ${usage_version} outside the cooldown" >&2
+  exit 1
+fi
+mise use --env canary "github:traefik/traefik@$version"
+traefik="$(mise --env canary which traefik)"
+yaegi="$(go version -m "$traefik" | awk '$2 == "github.com/traefik/yaegi" { sub(/^v/, "", $3); print $3 }')"
+if [[ -z "$yaegi" ]]; then
+  echo "traefik build info does not list github.com/traefik/yaegi" >&2
+  exit 1
+fi
+mise use --env canary "aqua:traefik/yaegi@$yaegi"
+mise --env canary lock --platform linux-x64,linux-arm64,macos-arm64
+'''
+
 [tasks.check]
 description = "Run format checks, linters and unit tests under Go and Yaegi"
 depends = ["format:check", "lint", "test", "test:yaegi"]
