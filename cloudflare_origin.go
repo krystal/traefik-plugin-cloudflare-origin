@@ -34,11 +34,12 @@ var strippedHeaders = map[string]bool{
 // Config is the plugin configuration. Traefik matches keys to field names
 // case-insensitively.
 type Config struct {
-	ClientCertFingerprints []string `json:"clientCertFingerprints"`
-	ProtectedHosts         []string `json:"protectedHosts"`
-	DirectAccessCIDRs      []string `json:"directAccessCIDRs"`
-	ProtectAllHosts        bool     `json:"protectAllHosts"`
-	AllowMissingClientIP   bool     `json:"allowMissingClientIP"`
+	ClientCertFingerprints  []string `json:"clientCertFingerprints"`
+	RevokedCertFingerprints []string `json:"revokedCertFingerprints"`
+	ProtectedHosts          []string `json:"protectedHosts"`
+	DirectAccessCIDRs       []string `json:"directAccessCIDRs"`
+	ProtectAllHosts         bool     `json:"protectAllHosts"`
+	AllowMissingClientIP    bool     `json:"allowMissingClientIP"`
 }
 
 // CreateConfig returns the default configuration.
@@ -50,6 +51,7 @@ func CreateConfig() *Config {
 type CloudflareOrigin struct {
 	next                 http.Handler
 	fingerprints         map[string]bool
+	revoked              map[string]bool
 	protectedHosts       map[string]bool
 	directAccess         []*net.IPNet
 	protectAllHosts      bool
@@ -61,13 +63,14 @@ func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.H
 	c := &CloudflareOrigin{
 		next:                 next,
 		fingerprints:         map[string]bool{},
+		revoked:              map[string]bool{},
 		protectedHosts:       map[string]bool{},
 		protectAllHosts:      cfg.ProtectAllHosts,
 		allowMissingClientIP: cfg.AllowMissingClientIP,
 	}
 
 	for _, raw := range cfg.ClientCertFingerprints {
-		fp, err := parseFingerprint(raw)
+		fp, err := parseFingerprint("clientCertFingerprints", raw)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
@@ -75,6 +78,17 @@ func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.H
 	}
 	if len(c.fingerprints) == 0 {
 		return nil, fmt.Errorf("%s: clientCertFingerprints must contain at least one fingerprint", name)
+	}
+
+	for _, raw := range cfg.RevokedCertFingerprints {
+		fp, err := parseFingerprint("revokedCertFingerprints", raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		if c.fingerprints[fp] {
+			return nil, fmt.Errorf("%s: fingerprint %q is in both clientCertFingerprints and revokedCertFingerprints", name, raw)
+		}
+		c.revoked[fp] = true
 	}
 
 	for _, raw := range cfg.ProtectedHosts {
@@ -96,11 +110,11 @@ func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.H
 	return c, nil
 }
 
-func parseFingerprint(raw string) (string, error) {
+func parseFingerprint(option, raw string) (string, error) {
 	fp := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(raw), ":", ""))
 	b, err := hex.DecodeString(fp)
 	if err != nil || len(b) != sha256.Size {
-		return "", fmt.Errorf("invalid clientCertFingerprints entry %q: want a SHA-256 hex digest", raw)
+		return "", fmt.Errorf("invalid %s entry %q: want a SHA-256 hex digest", option, raw)
 	}
 	return fp, nil
 }
@@ -225,22 +239,29 @@ func (c *CloudflareOrigin) ServeHTTP(rw http.ResponseWriter, req *http.Request) 
 }
 
 // verified reports whether a verified chain contains a certificate pinned by
-// this instance. PeerCertificates alone are not trusted: they are present
-// without verification under RequireAnyClientCert, and a chain verified by a
-// different TLS option's CA must not count either.
+// this instance and no verified chain contains a revoked one. PeerCertificates
+// alone are not trusted: they are present without verification under
+// RequireAnyClientCert, and a chain verified by a different TLS option's CA
+// must not count either. A revoked certificate in any chain wins over a pin in
+// another, so an alternate path around a revoked intermediate cannot verify.
 func (c *CloudflareOrigin) verified(state *tls.ConnectionState) bool {
 	if state == nil {
 		return false
 	}
+	pinned := false
 	for _, chain := range state.VerifiedChains {
 		for _, cert := range chain {
 			sum := sha256.Sum256(cert.Raw)
-			if c.fingerprints[hex.EncodeToString(sum[:])] {
-				return true
+			fp := hex.EncodeToString(sum[:])
+			if c.revoked[fp] {
+				return false
+			}
+			if c.fingerprints[fp] {
+				pinned = true
 			}
 		}
 	}
-	return false
+	return pinned
 }
 
 // isProtected matches Traefik's routing host, with trailing dots trimmed so
