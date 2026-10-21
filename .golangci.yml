@@ -1,0 +1,25 @@
+version: "2"
+
+run:
+  build-tags:
+    - e2e
+
+linters:
+  default: standard
+  enable:
+    - errorlint
+    - gosec
+    - misspell
+    - nolintlint
+    - revive
+  exclusions:
+    # Unchecked Close and fmt.Fprint* errors, mostly in test cleanup.
+    presets:
+      - std-error-handling
+  # modernize and intrange stay off: their suggestions (min/max, range over
+  # int, slices) do not run under the Yaegi version Traefik embeds.
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports

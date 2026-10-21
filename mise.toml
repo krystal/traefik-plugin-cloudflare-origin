@@ -1,0 +1,34 @@
+[tools]
+go = "1.26.9"
+golangci-lint = "2.15.0"
+"aqua:traefik/yaegi" = "0.16.1"
+"github:traefik/traefik" = "3.7.9"
+
+[tasks.test]
+description = "Run unit tests with the Go toolchain"
+run = "go test -count=1 ./..."
+
+[tasks."test:yaegi"]
+description = "Run unit tests under the Yaegi interpreter Traefik embeds"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+import_path=github.com/krystal/traefik-plugin-cloudflare-origin
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/src/$import_path"
+cp .traefik.yml go.mod cloudflare_origin.go cloudflare_origin_test.go "$tmp/src/$import_path/"
+GOPATH="$tmp" GO111MODULE=off yaegi test -v "$import_path"
+'''
+
+[tasks.lint]
+description = "Run golangci-lint"
+run = "golangci-lint run"
+
+[tasks.e2e]
+description = "Run end-to-end tests against a real Traefik binary"
+run = "go test -tags e2e -count=1 -v ./e2e/"
+
+[tasks.check]
+description = "Run lint and unit tests under Go and Yaegi"
+depends = ["lint", "test", "test:yaegi"]
