@@ -671,3 +671,149 @@ func TestNewValidation(t *testing.T) {
 		assertResult(t, rec, b, expect{status: http.StatusForbidden})
 	})
 }
+
+// Pin removal must revoke the old chain on its own; the new chain needs no
+// other change. Resumed states replay the original handshake's
+// VerifiedChains, so they must be judged against the current pins too. The
+// states are synthetic: they prove the middleware's decision, not how Go or
+// Traefik resume TLS sessions.
+func TestPinRemoval(t *testing.T) {
+	newRoot := &x509.Certificate{Raw: []byte("new aop root ca")}
+	newLeaf := &x509.Certificate{Raw: []byte("new aop leaf")}
+	oldChain := []*x509.Certificate{aopLeaf, aopInter, aopRoot}
+	newChain := []*x509.Certificate{newLeaf, newRoot}
+
+	tests := []struct {
+		name     string
+		pins     []*x509.Certificate
+		chain    []*x509.Certificate
+		verified bool
+	}{
+		{"old-only pins, old chain", []*x509.Certificate{aopRoot}, oldChain, true},
+		{"old-only pins, new chain", []*x509.Certificate{aopRoot}, newChain, false},
+		{"overlapping pins, old chain", []*x509.Certificate{aopRoot, newRoot}, oldChain, true},
+		{"overlapping pins, new chain", []*x509.Certificate{aopRoot, newRoot}, newChain, true},
+		{"new-only pins, old chain", []*x509.Certificate{newRoot}, oldChain, false},
+		{"new-only pins, new chain", []*x509.Certificate{newRoot}, newChain, true},
+	}
+	for _, tt := range tests {
+		for _, resumed := range []bool{false, true} {
+			for _, host := range []string{protectedHost, openHost} {
+				name := tt.name + " on " + host
+				if resumed {
+					name += ", resumed"
+				}
+				t.Run(name, func(t *testing.T) {
+					b := &backend{}
+					cfg := baseConfig()
+					cfg.ClientCertFingerprints = nil
+					for _, pin := range tt.pins {
+						cfg.ClientCertFingerprints = append(cfg.ClientCertFingerprints, fingerprint(pin))
+					}
+					h := mustNew(t, b.handler(), cfg)
+					state := verifiedState(tt.chain)
+					state.DidResume = resumed
+					rec := serve(h, request{
+						host: host, remoteAddr: edgePeer, tls: state,
+						header: map[string][]string{cfConnectingIP: {"203.0.113.7"}},
+					})
+					switch {
+					case tt.verified:
+						assertResult(t, rec, b, expect{
+							status: http.StatusOK, remoteAddr: "203.0.113.7:44321", realIP: "203.0.113.7", cfIP: "203.0.113.7",
+						})
+					case host == protectedHost:
+						assertResult(t, rec, b, expect{status: http.StatusForbidden})
+					default:
+						assertResult(t, rec, b, expect{status: http.StatusOK, remoteAddr: edgePeer, realIP: edgeIP})
+					}
+				})
+			}
+		}
+	}
+}
+
+// The direct-access exception must come only from a parseable peer address,
+// and a zone must not change which CIDR a scoped IPv6 peer is checked against.
+func TestOriginalPeerDirectAccess(t *testing.T) {
+	tests := []struct {
+		name    string
+		peer    string
+		allowed bool
+	}{
+		{"allowlisted IPv4 without port", "192.0.2.10", false},
+		{"allowlisted IPv6 without brackets or port", "2001:db8:1::5", false},
+		{"empty", "", false},
+		{"garbage", "garbage", false},
+		{"garbage host with port", "not-an-ip:5555", false},
+		{"missing closing bracket", "[2001:db8:1::5:5555", false},
+		{"missing opening bracket", "2001:db8:1::5]:5555", false},
+		{"extra port", "192.0.2.10:5555:5555", false},
+		{"scoped IPv6 inside CIDR", "[fe80::1%eth0]:1234", true},
+		{"scoped IPv6 outside CIDR", "[fe80:0:0:1::1%eth0]:1234", false},
+		{"zone naming an allowlisted IP", "[2001:db8:ffff::1%192.0.2.10]:1234", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := &backend{}
+			cfg := baseConfig()
+			cfg.DirectAccessCIDRs = append(cfg.DirectAccessCIDRs, "fe80::/64")
+			h := mustNew(t, b.handler(), cfg)
+			// Both headers name an allowlisted address, so only the peer can
+			// decide the gate.
+			rec := serve(h, request{
+				host: protectedHost, remoteAddr: tt.peer,
+				header: map[string][]string{xRealIP: {"192.0.2.10"}, cfConnectingIP: {"192.0.2.10"}},
+			})
+			want := expect{status: http.StatusForbidden}
+			if tt.allowed {
+				want = expect{status: http.StatusOK, remoteAddr: tt.peer, realIP: "192.0.2.10"}
+			}
+			assertResult(t, rec, b, want)
+		})
+	}
+}
+
+// Restoration needs the original peer's port, so a verified request from a
+// malformed peer keeps its RemoteAddr and must not deliver Cf-Connecting-Ip.
+func TestVerifiedRewriteWithMalformedPeer(t *testing.T) {
+	tests := []struct {
+		name       string
+		peer       string
+		remoteAddr string
+	}{
+		{"no port", edgeIP, ""},
+		{"empty port", edgeIP + ":", ""},
+		{"empty", "", ""},
+		{"missing closing bracket", "[2001:db8::1:443", ""},
+		{"scoped IPv6 peer", "[fe80::1%eth0]:1234", "203.0.113.7:1234"},
+	}
+	for _, tt := range tests {
+		for _, allowMissing := range []bool{true, false} {
+			name := tt.name
+			if !allowMissing {
+				name += ", allowMissingClientIP false"
+			}
+			t.Run(name, func(t *testing.T) {
+				b := &backend{}
+				cfg := baseConfig()
+				cfg.AllowMissingClientIP = allowMissing
+				h := mustNew(t, b.handler(), cfg)
+				rec := serve(h, request{
+					host: protectedHost, remoteAddr: tt.peer, tls: aopChain(),
+					header: map[string][]string{xRealIP: {edgeIP}, cfConnectingIP: {"203.0.113.7"}},
+				})
+				switch {
+				case tt.remoteAddr != "":
+					assertResult(t, rec, b, expect{
+						status: http.StatusOK, remoteAddr: tt.remoteAddr, realIP: "203.0.113.7", cfIP: "203.0.113.7",
+					})
+				case allowMissing:
+					assertResult(t, rec, b, expect{status: http.StatusOK, remoteAddr: tt.peer, realIP: edgeIP})
+				default:
+					assertResult(t, rec, b, expect{status: http.StatusForbidden})
+				}
+			})
+		}
+	}
+}
