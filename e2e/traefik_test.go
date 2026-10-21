@@ -26,9 +26,10 @@ const (
 	readyTimeout = 60 * time.Second
 )
 
-// traefikMajor matches the Traefik major version the plugin targets. mise.lock
-// pins the exact release the suite runs against.
-var traefikMajor = regexp.MustCompile(`(?m)^Version:\s+(3\.\S+)$`)
+// traefikV3Version matches the version line of the Traefik major the plugin
+// targets, capturing the version. mise.lock pins the exact release the suite
+// runs against.
+var traefikV3Version = regexp.MustCompile(`(?m)^Version:\s+(3\.\S+)$`)
 
 var (
 	shippedFiles = []string{".traefik.yml", "go.mod", "cloudflare_origin.go"}
@@ -75,7 +76,7 @@ func requireTraefikVersion(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("traefik version: %v\n%s", err, out)
 	}
-	m := traefikMajor.FindSubmatch(out)
+	m := traefikV3Version.FindSubmatch(out)
 	if m == nil {
 		t.Fatalf("traefik version is not 3.x:\n%s", out)
 	}

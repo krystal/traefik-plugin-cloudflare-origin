@@ -635,15 +635,15 @@ manages; this covers all other headers too.
 Tools and tasks are managed with [mise](https://mise.jdx.dev). `mise.toml` pins
 each tool to a major version, and `mise.lock` pins the exact version and
 checksum for linux-x64, linux-arm64 and macos-arm64. mise skips tool releases
-younger than three days.
+younger than three days, and CI applies the same cooldown to the mise binary.
 
 | Task                    | What it does                                                                |
 | ----------------------- | --------------------------------------------------------------------------- |
 | `mise run setup`        | Install tools and the lefthook pre-commit hook                              |
-| `mise run check`        | `format:check`, `lint`, `test` and `test:yaegi`; run it before pushing     |
+| `mise run check`        | `format:check`, `lint`, `test` and `test:yaegi`; run it before pushing      |
 | `mise run format`       | Format Go code                                                              |
 | `mise run format:check` | Check Go formatting without changing files                                  |
-| `mise run lint`         | golangci-lint (including the e2e suite), actionlint, zizmor and pinact      |
+| `mise run lint`         | golangci-lint (including the e2e suite), actionlint, zizmor and pinact[^1]  |
 | `mise run test`         | Unit tests with the Go toolchain                                            |
 | `mise run test:yaegi`   | The same unit tests under the Yaegi CLI                                     |
 | `mise run e2e`          | End-to-end tests against the locked Traefik binary, standard and fast proxy |
@@ -652,11 +652,17 @@ younger than three days.
 CI runs `lint`, `format:check`, `test`, `test:yaegi` and `e2e` as separate
 jobs.
 
+[^1]: zizmor runs its online audits, such as `known-vulnerable-actions`, only
+    when `GH_TOKEN` or `GITHUB_TOKEN` is set, as in CI, and runs offline
+    otherwise. pinact always queries the GitHub API, with the token when one is
+    set.
+
 The pre-commit hook (`lefthook.yml`) checks staged files offline: Go
 formatting, golangci-lint when Go or lint config changes, and actionlint,
 pinact and zizmor when workflow or `.github` YAML changes. It reads the working
-tree, so CI stays authoritative. pinact's release-age check needs the GitHub
-API and runs only in CI.
+tree, and it skips itself without failing when `lefthook` or `mise` is not on
+the `PATH` of the program running `git commit`, so CI stays authoritative.
+pinact's release-age check needs the GitHub API and runs only in CI.
 
 The plugin must stay compatible with the Yaegi version Traefik embeds (v0.16.1
 in Traefik v3.7) and its Go 1.22 standard library: no generics, no `slices`,

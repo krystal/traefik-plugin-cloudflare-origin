@@ -25,5 +25,5 @@ pre-commit:
     # zizmor's config and Dependabot file affect every audit, so any staged
     # .github YAML change audits the whole directory.
     - name: zizmor
-      glob: ".github/**/*.{yml,yaml}"
+      glob: [".github/*.{yml,yaml}", ".github/**/*.{yml,yaml}"]
       run: mise exec -- zizmor --offline .github

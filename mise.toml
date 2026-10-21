@@ -37,8 +37,16 @@ description = "Check GitHub Actions workflows with actionlint"
 run = "actionlint"
 
 [tasks."lint:zizmor"]
-description = "Audit GitHub Actions workflows with zizmor"
-run = "zizmor --offline .github"
+description = "Audit GitHub Actions workflows with zizmor, online when a GitHub token is set"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]]; then
+  zizmor .github
+else
+  zizmor --offline .github
+fi
+'''
 
 [tasks."lint:pinact"]
 description = "Check that GitHub Actions are SHA-pinned to releases at least three days old"
