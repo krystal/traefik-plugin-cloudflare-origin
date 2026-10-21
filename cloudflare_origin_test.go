@@ -775,11 +775,11 @@ func TestNewRevokedValidation(t *testing.T) {
 	}
 }
 
-// Pin removal must revoke the old chain on its own; the new chain needs no
-// other change. Resumed states replay the original handshake's
-// VerifiedChains, so they must be judged against the current pins too. The
-// states are synthetic: they prove the middleware's decision, not how Go or
-// Traefik resume TLS sessions.
+// Removing the old pin must stop trusting the old chain without
+// revokedCertFingerprints; the new chain needs no other change. Resumed
+// states replay the original handshake's VerifiedChains, so they must be
+// judged against the current pins too. The states are synthetic: they prove
+// the middleware's decision, not how Go or Traefik resume TLS sessions.
 func TestPinRemoval(t *testing.T) {
 	newRoot := &x509.Certificate{Raw: []byte("new aop root ca")}
 	newLeaf := &x509.Certificate{Raw: []byte("new aop leaf")}
