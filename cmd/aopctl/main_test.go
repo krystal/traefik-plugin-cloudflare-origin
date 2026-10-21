@@ -227,6 +227,12 @@ func resetConnection(t *testing.T, w http.ResponseWriter) {
 	_ = conn.Close()
 }
 
+// stall holds a request until the client gives up on it, so the command's
+// budget runs out while the request is in flight.
+func stall(r *http.Request) {
+	<-r.Context().Done()
+}
+
 func certJSON(c *fakeCert, status string) map[string]any {
 	return map[string]any{
 		"id": c.id, "certificate": c.pem, "status": status,
@@ -374,9 +380,12 @@ type harness struct {
 	now       time.Time
 
 	// waits counts poll waits. When waitLimit is set, that wait reports the
-	// budget as exhausted.
-	waits     int
-	waitLimit int
+	// budget as exhausted. blockWaits makes every wait last until the
+	// command's budget runs out, as a poll interval longer than the budget
+	// does.
+	waits      int
+	waitLimit  int
+	blockWaits bool
 }
 
 func newHarness(t *testing.T) *harness {
@@ -415,6 +424,10 @@ func (h *harness) run(args ...string) (code int, stdout, stderr string) {
 		httpClient:       &http.Client{Timeout: requestTimeout},
 		wait: func(ctx context.Context, _ time.Duration) error {
 			h.waits++
+			if h.blockWaits {
+				<-ctx.Done()
+				return ctx.Err()
+			}
 			if h.waitLimit > 0 && h.waits >= h.waitLimit {
 				return context.DeadlineExceeded
 			}

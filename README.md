@@ -952,9 +952,10 @@ so there is nothing to resume or roll back. It prints the `aopctl leaf prune`
 command that deletes the certificate, so you can run `leaf issue` again, and
 the `aopctl leaf associate` command to use if it becomes active later.
 
-If the upload fails without a usable response, for example on a timeout,
-`leaf issue` reports that the outcome is unknown. Cloudflare may have created
-the certificate, so run `aopctl leaf status` before you retry.
+If the upload fails without a usable response or with a server error, for
+example on a timeout or an HTTP 5xx, `leaf issue` reports that the outcome is
+unknown. Cloudflare may have created the certificate, so run
+`aopctl leaf status` before you retry.
 
 ### If a leaf key leaks
 

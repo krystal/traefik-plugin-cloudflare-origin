@@ -222,11 +222,11 @@ func (a *app) waitForAssociations(ctx context.Context, cf *cfClient, id string, 
 	lastErr := map[string]error{}
 	for {
 		var still []string
-		for _, h := range pending {
+		for i, h := range pending {
 			assoc, err := cf.getAssociation(ctx, h)
 			if err != nil {
 				if ctx.Err() != nil {
-					return associationTimeout(id, pending, observed, lastErr)
+					return associationTimeout(id, append(still, pending[i:]...), observed, lastErr)
 				}
 				if !isTransient(err) {
 					return fmt.Errorf("check association for %s: %w", h, err)
@@ -368,9 +368,9 @@ func (a *app) leafIssue(args []string) error {
 
 	newID, err := cf.uploadCert(ctx, encodeCertPEM(leaf), leafKeyPEM)
 	var apiErr *apiError
-	// A 2xx response that could not be read may still have created a
-	// certificate.
-	if errors.As(err, &apiErr) && (!apiErr.decoded || apiErr.status >= 200 && apiErr.status <= 299) {
+	// Only a Cloudflare 4xx shows that no certificate was created. A 5xx, a
+	// 2xx or a response that could not be read may follow a create.
+	if errors.As(err, &apiErr) && (!apiErr.decoded || apiErr.status < 400 || apiErr.status > 499) {
 		return fmt.Errorf("upload outcome unknown: %w: a certificate may have been created, so run aopctl leaf status before retrying", err)
 	}
 	if err != nil {

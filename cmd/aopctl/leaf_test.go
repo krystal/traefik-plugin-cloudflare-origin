@@ -256,6 +256,35 @@ func TestLeafIssueFailures(t *testing.T) {
 		}
 	})
 
+	// A server error or an unsuccessful 2xx may follow a create that
+	// happened.
+	for _, tt := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"upload server error", http.StatusInternalServerError, `{"success":false,"errors":[{"code":1000,"message":"internal error"}],"messages":[],"result":null}`},
+		{"upload unsuccessful 200", http.StatusOK, `{"success":false,"errors":[{"code":1000,"message":"internal error"}],"messages":[],"result":null}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := issueHarness(t)
+			h.fake.hook = func(w http.ResponseWriter, r *http.Request, _ []byte) bool {
+				if r.Method != http.MethodPost {
+					return false
+				}
+				writeRaw(w, tt.status, "application/json", tt.body)
+				return true
+			}
+			code, _, stderr := h.run("leaf", "issue")
+			if code != 1 || !strings.Contains(stderr, "upload outcome unknown") || !strings.Contains(stderr, "aopctl leaf status before retrying") {
+				t.Errorf("exit %d; stderr:\n%s", code, stderr)
+			}
+			if n := h.fake.count(http.MethodPut, "/hostnames"); n != 0 {
+				t.Errorf("sent %d PUTs", n)
+			}
+		})
+	}
+
 	t.Run("certificate never active", func(t *testing.T) {
 		h := issueHarness(t)
 		h.fake.uploadStatuses = []string{"pending_deployment"}
@@ -374,6 +403,25 @@ func TestLeafIssueFailures(t *testing.T) {
 		}
 		if w := h.fake.writes(); len(w) != 0 {
 			t.Errorf("sent %d write requests", len(w))
+		}
+	})
+
+	t.Run("preflight association without a cert_id", func(t *testing.T) {
+		h := issueHarness(t)
+		h.fake.hook = func(w http.ResponseWriter, r *http.Request, _ []byte) bool {
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/hostnames/"+hostD) {
+				writeRaw(w, http.StatusOK, "application/json", `{"success":true,"errors":[],"messages":[],"result":null}`)
+				return true
+			}
+			return false
+		}
+		h.waitLimit = 20
+		code, _, stderr := h.run("leaf", "issue")
+		if w := h.fake.writes(); len(w) != 0 {
+			t.Fatalf("sent %d write requests", len(w))
+		}
+		if code != 1 || !strings.Contains(stderr, "read association for d.example.com") {
+			t.Errorf("exit %d; stderr:\n%s", code, stderr)
 		}
 	})
 
@@ -1020,6 +1068,26 @@ func TestLeafPruneRefusals(t *testing.T) {
 		}
 	})
 
+	for _, result := range []string{"null", "{}"} {
+		t.Run("association result "+result, func(t *testing.T) {
+			h := pruneHarness(t)
+			h.fake.hook = func(w http.ResponseWriter, r *http.Request, _ []byte) bool {
+				if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/hostnames/"+hostB) {
+					writeRaw(w, http.StatusOK, "application/json", `{"success":true,"errors":[],"messages":[],"result":`+result+`}`)
+					return true
+				}
+				return false
+			}
+			code, _, stderr := h.run("leaf", "prune", "--cert-id", "old", "--yes")
+			if d := deletes(h); len(d) != 0 {
+				t.Fatalf("deleted %v after an association read without a cert_id", d)
+			}
+			if code != 1 || !strings.Contains(stderr, "read association for b.example.com: GET /zones/{zone}/origin_tls_client_auth/hostnames/b.example.com: HTTP 200: association result has no cert_id") {
+				t.Errorf("exit %d; stderr:\n%s", code, stderr)
+			}
+		})
+	}
+
 	t.Run("only named ids", func(t *testing.T) {
 		h := pruneHarness(t)
 		code, _, stderr := h.run("leaf", "prune", "--cert-id", "old", "--yes")
@@ -1265,6 +1333,146 @@ func TestLeafPruneCompletion(t *testing.T) {
 			}
 			if d := deletes(h); len(d) != 0 {
 				t.Errorf("deleted %v", d)
+			}
+		})
+	}
+}
+
+// TestBudgetRunsOut runs commands under a real --timeout that ends either in
+// a poll wait or while a polling read is in flight. Either way, the error
+// reports the last observed state, not the context error.
+func TestBudgetRunsOut(t *testing.T) {
+	const budget = "250ms"
+	// errorLine returns the command's error, without the recovery report.
+	errorLine := func(stderr string) string {
+		for _, line := range strings.Split(stderr, "\n") {
+			if strings.HasPrefix(line, "aopctl: ") {
+				return line
+			}
+		}
+		return ""
+	}
+	// stallAfter stalls the GETs whose path ends in suffix once write has
+	// been sent and skip of them have been answered.
+	stallAfter := func(h *harness, write, suffix string, skip int) {
+		written := false
+		reads := 0
+		h.fake.hook = func(_ http.ResponseWriter, r *http.Request, _ []byte) bool {
+			if r.Method == write {
+				written = true
+			}
+			if !written || r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, suffix) {
+				return false
+			}
+			reads++
+			if reads <= skip {
+				return false
+			}
+			stall(r)
+			return true
+		}
+	}
+
+	for _, tt := range []struct {
+		name  string
+		setup func(h *harness)
+	}{
+		{"certificate, budget ends in a wait", func(h *harness) { h.blockWaits = true }},
+		{"certificate, budget ends in a read", func(h *harness) { stallAfter(h, http.MethodPost, "/certificates/new-1", 1) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := issueHarness(t)
+			h.fake.uploadStatuses = []string{"pending_deployment"}
+			tt.setup(h)
+			code, _, stderr := h.run("leaf", "issue", "--timeout", budget)
+			if code != 1 {
+				t.Fatalf("exit %d; stderr:\n%s", code, stderr)
+			}
+			if got, want := errorLine(stderr), "aopctl: timed out waiting for certificate new-1 to become active: last status pending_deployment"; got != want {
+				t.Errorf("error = %q, want %q", got, want)
+			}
+			if n := h.fake.count(http.MethodPut, "/hostnames"); n != 0 {
+				t.Errorf("sent %d PUTs", n)
+			}
+		})
+	}
+
+	pending := func(host string) string {
+		return host + ": new-1 (enabled=true, status=pending_deployment)"
+	}
+	t.Run("association, budget ends in a wait", func(t *testing.T) {
+		t.Parallel()
+		h := issueHarness(t)
+		h.fake.uploadStatuses = []string{statusActive}
+		h.fake.assocStatuses = []string{"pending_deployment"}
+		h.blockWaits = true
+		code, _, stderr := h.run("leaf", "issue", "--timeout", budget)
+		if code != 1 {
+			t.Fatalf("exit %d; stderr:\n%s", code, stderr)
+		}
+		want := "aopctl: timed out waiting for hostnames to use certificate new-1: last observed " +
+			strings.Join([]string{pending(hostA), pending(hostB), pending(hostC), pending(hostD)}, "; ")
+		if got := errorLine(stderr); got != want {
+			t.Errorf("error = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("association, budget ends in a read", func(t *testing.T) {
+		t.Parallel()
+		h := issueHarness(t)
+		h.fake.assocStatuses = []string{"pending_deployment"}
+		// In the second round, hostA becomes active and the read of hostB
+		// stalls.
+		put := false
+		reads := map[string]int{}
+		h.fake.hook = func(_ http.ResponseWriter, r *http.Request, _ []byte) bool {
+			if r.Method == http.MethodPut {
+				put = true
+			}
+			if !put || r.Method != http.MethodGet {
+				return false
+			}
+			host := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+			reads[host]++
+			switch {
+			case host == hostA && reads[host] == 2:
+				h.fake.assocs[hostA].statuses = []string{statusActive}
+			case host == hostB && reads[host] == 2:
+				stall(r)
+				return true
+			}
+			return false
+		}
+		code, _, stderr := h.run("leaf", "issue", "--timeout", budget)
+		if code != 1 {
+			t.Fatalf("exit %d; stderr:\n%s", code, stderr)
+		}
+		want := "aopctl: timed out waiting for hostnames to use certificate new-1: last observed " +
+			strings.Join([]string{pending(hostB), pending(hostC), pending(hostD)}, "; ")
+		if got := errorLine(stderr); got != want {
+			t.Errorf("error = %q, want %q", got, want)
+		}
+	})
+
+	for _, tt := range []struct {
+		name  string
+		setup func(h *harness)
+	}{
+		{"deletion, budget ends in a wait", func(h *harness) { h.blockWaits = true }},
+		{"deletion, budget ends in a read", func(h *harness) { stallAfter(h, http.MethodDelete, "/certificates/old", 1) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := pruneHarness(t)
+			h.fake.deleteStatuses = []string{statusPendingDeletion}
+			tt.setup(h)
+			code, _, stderr := h.run("leaf", "prune", "--cert-id", "old", "--yes", "--timeout", budget)
+			if code != 1 || !strings.Contains(stderr, "Failed old: timed out waiting for the delete to finish: last status pending_deletion\n") {
+				t.Errorf("exit %d; stderr:\n%s", code, stderr)
+			}
+			if d := deletes(h); strings.Join(d, ",") != "old" {
+				t.Errorf("deleted %v, want old once", d)
 			}
 		})
 	}

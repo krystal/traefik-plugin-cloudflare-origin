@@ -65,6 +65,20 @@ type association struct {
 	Status   string `json:"status"`
 }
 
+// validate rejects a result without a cert_id, such as null or {}, so a
+// drifted response cannot pass for "no association".
+func (a *association) validate() error {
+	if a.CertID == "" {
+		return errors.New("association result has no cert_id")
+	}
+	return nil
+}
+
+// validator is implemented by results that check their decoded fields.
+type validator interface {
+	validate() error
+}
+
 type apiMessage struct {
 	Code    int
 	Message string
@@ -276,6 +290,11 @@ func (c *cfClient) do(ctx context.Context, method, path string, query url.Values
 			return fail(&apiError{status: resp.StatusCode, detail: "undecodable result", decoded: true})
 		}
 	}
+	if v, ok := result.(validator); ok {
+		if err := v.validate(); err != nil {
+			return fail(&apiError{status: resp.StatusCode, detail: err.Error(), decoded: true})
+		}
+	}
 	if env.ResultInfo != nil {
 		return env.ResultInfo.TotalPages, nil
 	}
@@ -337,9 +356,6 @@ func (c *cfClient) getAssociation(ctx context.Context, hostname string) (*associ
 	}
 	if err != nil {
 		return nil, err
-	}
-	if assoc.CertID == "" {
-		return nil, nil
 	}
 	return &assoc, nil
 }
