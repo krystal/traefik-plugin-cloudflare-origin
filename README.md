@@ -639,6 +639,7 @@ younger than three days.
 
 | Task                    | What it does                                                                |
 | ----------------------- | --------------------------------------------------------------------------- |
+| `mise run setup`        | Install tools and the lefthook pre-commit hook                              |
 | `mise run check`        | `format:check`, `lint`, `test` and `test:yaegi`; run it before pushing     |
 | `mise run format`       | Format Go code                                                              |
 | `mise run format:check` | Check Go formatting without changing files                                  |
@@ -650,6 +651,12 @@ younger than three days.
 
 CI runs `lint`, `format:check`, `test`, `test:yaegi` and `e2e` as separate
 jobs.
+
+The pre-commit hook (`lefthook.yml`) checks staged files offline: Go
+formatting, golangci-lint when Go or lint config changes, and actionlint,
+pinact and zizmor when workflow or `.github` YAML changes. It reads the working
+tree, so CI stays authoritative. pinact's release-age check needs the GitHub
+API and runs only in CI.
 
 The plugin must stay compatible with the Yaegi version Traefik embeds (v0.16.1
 in Traefik v3.7) and its Go 1.22 standard library: no generics, no `slices`,
@@ -674,9 +681,19 @@ say so in the pull request.
 
 [release-please](https://github.com/googleapis/release-please) maintains a
 release pull request from the [Conventional Commits](https://www.conventionalcommits.org)
-on `main`. Merging it tags the release (`vX.Y.Z`), creates the GitHub release
-and updates `CHANGELOG.md`. Before 1.0.0, `feat` commits bump the minor
-version and `fix` commits the patch version.
+on `main`, configured in `.github/release-please-config.json`. Merging it tags
+the release (`vX.Y.Z`), creates the GitHub release and updates `CHANGELOG.md`.
+The first release is `v0.1.0`. Before 1.0.0, breaking changes bump the minor
+version, and `feat` and `fix` commits bump the patch version.
+
+The release-please job runs last in CI, only after every other job passes on a
+push to `main` or a `release-X.Y.x` maintenance branch. It runs in the
+`release` environment and authenticates as a GitHub App, so its release pull
+requests trigger CI. The environment must have:
+
+- a deployment branch policy that allows only `main` and `release-*.x`;
+- the App's client ID in the `RELEASE_PLEASE_GITHUB_CLIENT_ID` variable; and
+- the App's private key in the `RELEASE_PLEASE_GITHUB_APP_PRIVATE_KEY` secret.
 
 ## License
 

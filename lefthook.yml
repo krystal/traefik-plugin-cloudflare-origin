@@ -1,0 +1,29 @@
+# Fast, offline checks on staged files. CI stays authoritative: these checks
+# read the working tree, so unstaged edits to a staged file are checked too,
+# and pinact's release-age check needs the GitHub API, so it runs only in CI.
+pre-commit:
+  parallel: true
+  jobs:
+    - name: go format
+      glob: "*.go"
+      run: mise exec -- golangci-lint fmt --diff {staged_files}
+
+    # golangci-lint needs whole packages to type-check, so any staged Go or
+    # lint config change lints the module.
+    - name: go lint
+      glob: ["*.go", "go.mod", ".golangci.yml"]
+      run: mise exec -- golangci-lint run
+
+    - name: actionlint
+      glob: ".github/workflows/*.{yml,yaml}"
+      run: mise exec -- actionlint {staged_files}
+
+    - name: pinact
+      glob: ".github/workflows/*.{yml,yaml}"
+      run: mise exec -- pinact run --fix=false --no-api {staged_files}
+
+    # zizmor's config and Dependabot file affect every audit, so any staged
+    # .github YAML change audits the whole directory.
+    - name: zizmor
+      glob: ".github/**/*.{yml,yaml}"
+      run: mise exec -- zizmor --offline .github

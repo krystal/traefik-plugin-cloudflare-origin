@@ -3,3 +3,9 @@ rules:
     config:
       # Project policy is a three-day cooldown for every dependency source.
       days: 3
+  cache-poisoning:
+    ignore:
+      # The release-please job only tags the tested commit and publishes no
+      # artifacts built in CI, so a poisoned tool cache cannot reach a release.
+      # Revisit if ci.yml ever builds or uploads release artifacts.
+      - ci.yml

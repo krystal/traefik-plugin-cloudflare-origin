@@ -10,10 +10,15 @@ golangci-lint = "2"
 actionlint = "1"
 pinact = "5"
 zizmor = "1"
+lefthook = "2"
 # Traefik and the Yaegi CLI are test targets. The e2e suite checks that the
 # Yaegi CLI matches the Yaegi version built into the Traefik binary.
 "aqua:traefik/yaegi" = "0"
 "github:traefik/traefik" = "3"
+
+[tasks.setup]
+description = "Install tools and the lefthook git hooks"
+run = ["mise install", "lefthook install"]
 
 [tasks.format]
 description = "Format Go code"
