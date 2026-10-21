@@ -18,7 +18,8 @@ the client.
 Traefik's `forwardedHeaders.trustedIPs` does not fix this. It keeps
 Cloudflare's `X-Forwarded-For` and appends the edge IP, so the rightmost entry
 is still the edge. Applications would need to trust Cloudflare's ranges, which
-is the problem described below.
+is the problem described below. Remove Cloudflare's ranges from `trustedIPs`
+when you adopt this plugin.
 
 This plugin makes the request look as if Cloudflare were not there. On a
 request it trusts, it rewrites the request's remote address to the client IP.
@@ -144,7 +145,7 @@ instance, that is every router on the entrypoint.
    openssl x509 -in aop-ca.crt -noout -fingerprint -sha256
    ```
 
-   Use the value after `sha256 Fingerprint=`. Colons are fine.
+   Use the value after `Fingerprint=`. Colons are fine.
 
 To rotate the CA, list both the old and new fingerprints, roll out the new
 certificate in Cloudflare, then remove the old fingerprint.
@@ -483,6 +484,13 @@ manages; this covers all other headers too.
   wildcard routers, use a router-level instance with `protectAllHosts`.
 - Keep Traefik's `cnameFlattening` off. It lets a CNAME alias match a protected
   `Host()` rule under a name that `protectedHosts` does not list.
+- Do not list Cloudflare's ranges in `forwardedHeaders.trustedIPs`, and do not
+  set `forwardedHeaders.insecure`, on an entrypoint that uses the plugin.
+  Traefik keeps the forwarding headers that trusted peers send, and the plugin
+  passes them through on requests it does not rewrite. With Cloudflare trusted,
+  a request from another Cloudflare account would reach the backend with an
+  `X-Forwarded-For` and `X-Real-Ip` of its choosing. List only proxies you
+  control.
 - Keep `forwardedHeaders.notAppendXForwardedFor` off, or Traefik will not add
   the restored client IP to `X-Forwarded-For`.
 - Keep HTTP/3 off. It is untested with this plugin.

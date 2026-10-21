@@ -7,7 +7,7 @@ summary: >-
   protected hosts to those requests or to allowlisted source CIDRs.
 testData:
   clientCertFingerprints:
-    - 0000000000000000000000000000000000000000000000000000000000000000
+    - "0000000000000000000000000000000000000000000000000000000000000000"
   protectedHosts:
     - protected.example.com
   directAccessCIDRs:
