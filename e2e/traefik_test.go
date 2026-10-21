@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"debug/buildinfo"
@@ -17,7 +16,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -80,22 +78,14 @@ type env struct {
 	fastProxy bool
 }
 
-// syncBuffer collects Traefik's output while the process writes to it.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
+// traefikLog is the path of the file Traefik writes its output to. Traefik
+// writes the file directly rather than through a pipe, so anything it logged
+// before answering a request is readable once the response arrives.
+type traefikLog string
 
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
+func (l traefikLog) String() string {
+	data, _ := os.ReadFile(string(l))
+	return string(data)
 }
 
 func requireTraefikVersion(t *testing.T) string {
@@ -254,14 +244,20 @@ func startTraefik(t *testing.T, opts traefikOptions) *env {
 	}
 }
 
-func runTraefik(t *testing.T, bin, dir string) (*syncBuffer, <-chan struct{}, func()) {
+func runTraefik(t *testing.T, bin, dir string) (traefikLog, <-chan struct{}, func()) {
 	t.Helper()
-	log := &syncBuffer{}
+	log := traefikLog(filepath.Join(dir, "traefik.log"))
+	out, err := os.Create(string(log))
+	if err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command(bin, "--configFile="+filepath.Join(dir, "traefik.yml")) //nolint:gosec // Runs the traefik binary from PATH by design.
 	cmd.Dir = dir
-	cmd.Stdout = log
-	cmd.Stderr = log
-	if err := cmd.Start(); err != nil {
+	cmd.Stdout = out
+	cmd.Stderr = out
+	err = cmd.Start()
+	_ = out.Close()
+	if err != nil {
 		t.Fatalf("start traefik: %v", err)
 	}
 	exited := make(chan struct{})
