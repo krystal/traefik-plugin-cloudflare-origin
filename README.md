@@ -695,11 +695,15 @@ version, and `feat` and `fix` commits bump the patch version.
 The release-please job runs last in CI, only after every other job passes on a
 push to `main` or a `release-X.Y.x` maintenance branch. It runs in the
 `release` environment and authenticates as a GitHub App, so its release pull
-requests trigger CI. The environment must have:
+requests trigger CI. It needs:
 
-- a deployment branch policy that allows only `main` and `release-*.x`;
-- the App's client ID in the `RELEASE_PLEASE_GITHUB_CLIENT_ID` variable; and
-- the App's private key in the `RELEASE_PLEASE_GITHUB_APP_PRIVATE_KEY` secret.
+- a GitHub App installed on this repository with read and write access to
+  contents, issues and pull requests, which the job requests when it creates
+  the App token; and
+- a `release` environment with a deployment branch policy that allows only
+  `main` and `release-*.x`, the App's client ID in the
+  `RELEASE_PLEASE_GITHUB_CLIENT_ID` variable, and the App's private key in the
+  `RELEASE_PLEASE_GITHUB_APP_PRIVATE_KEY` secret.
 
 ## License
 
