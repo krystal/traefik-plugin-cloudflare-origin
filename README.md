@@ -147,8 +147,18 @@ instance, that is every router on the entrypoint.
 
    Use the value after `Fingerprint=`. Colons are fine.
 
-To rotate the CA, list both the old and new fingerprints, roll out the new
-certificate in Cloudflare, then remove the old fingerprint.
+To rotate the CA:
+
+1. Trust both CAs in Traefik. Add a Secret for the new CA to the TLSOption's
+   `clientAuth.secretNames` next to the old one (or add it to `caFiles` with
+   the file provider). Without this, Traefik rejects the new certificate during
+   the TLS handshake, before the plugin can check it.
+2. List both the old and new fingerprints in `clientCertFingerprints`.
+3. Roll out the new client certificate in Cloudflare.
+4. Remove the old fingerprint and the old CA from Traefik.
+
+Rotating only the leaf certificate under an unchanged CA needs none of this
+when you pin the CA.
 
 ## Installing with the Traefik Helm chart
 
