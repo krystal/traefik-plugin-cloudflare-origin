@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"debug/buildinfo"
 	"errors"
 	"fmt"
 	"net"
@@ -21,10 +22,13 @@ import (
 )
 
 const (
-	traefikVersion = "3.7.9"
-	moduleName     = "github.com/krystal/traefik-plugin-cloudflare-origin"
-	readyTimeout   = 60 * time.Second
+	moduleName   = "github.com/krystal/traefik-plugin-cloudflare-origin"
+	readyTimeout = 60 * time.Second
 )
+
+// traefikMajor matches the Traefik major version the plugin targets. mise.lock
+// pins the exact release the suite runs against.
+var traefikMajor = regexp.MustCompile(`(?m)^Version:\s+(3\.\S+)$`)
 
 var (
 	shippedFiles = []string{".traefik.yml", "go.mod", "cloudflare_origin.go"}
@@ -71,10 +75,39 @@ func requireTraefikVersion(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("traefik version: %v\n%s", err, out)
 	}
-	if !regexp.MustCompile(`(?m)^Version:\s+` + regexp.QuoteMeta(traefikVersion) + `$`).Match(out) {
-		t.Fatalf("traefik version mismatch, want %s:\n%s", traefikVersion, out)
+	m := traefikMajor.FindSubmatch(out)
+	if m == nil {
+		t.Fatalf("traefik version is not 3.x:\n%s", out)
 	}
+	t.Logf("traefik %s", m[1])
 	return bin
+}
+
+// TestYaegiMatchesTraefik guards test:yaegi's fidelity: the Yaegi CLI must be
+// the same version as the interpreter compiled into the Traefik binary.
+func TestYaegiMatchesTraefik(t *testing.T) {
+	bin := requireTraefikVersion(t)
+	info, err := buildinfo.ReadFile(bin)
+	if err != nil {
+		t.Fatalf("read traefik build info: %v", err)
+	}
+	var embedded string
+	for _, dep := range info.Deps {
+		if dep.Path == "github.com/traefik/yaegi" {
+			embedded = strings.TrimPrefix(dep.Version, "v")
+		}
+	}
+	if embedded == "" {
+		t.Fatal("traefik build info does not list github.com/traefik/yaegi")
+	}
+
+	out, err := exec.Command("yaegi", "version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("yaegi version (run via `mise run e2e`): %v\n%s", err, out)
+	}
+	if cli := strings.TrimPrefix(strings.TrimSpace(string(out)), "v"); cli != embedded {
+		t.Fatalf("yaegi CLI is %s but traefik embeds yaegi %s; align the aqua:traefik/yaegi entry in mise.lock", cli, embedded)
+	}
 }
 
 func ipv6Available() bool {

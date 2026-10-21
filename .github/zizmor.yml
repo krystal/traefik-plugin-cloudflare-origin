@@ -1,0 +1,5 @@
+rules:
+  dependabot-cooldown:
+    config:
+      # Project policy is a three-day cooldown for every dependency source.
+      days: 3

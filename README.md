@@ -5,8 +5,9 @@ requests that present a pinned Cloudflare Authenticated Origin Pulls (AOP)
 client certificate, it restores the client IP from `Cf-Connecting-Ip`. It can
 also restrict hosts to those requests plus an allowlist of source CIDRs.
 
-It is built and tested against Traefik v3.7.9, which runs plugins through the
-Yaegi interpreter. The plugin uses only the Go standard library.
+It targets Traefik v3, which runs plugins through the Yaegi interpreter, and
+uses only the Go standard library. The test suite runs against the Traefik
+release locked in [`mise.lock`](mise.lock).
 
 To put one service behind Cloudflare with this plugin:
 
@@ -631,19 +632,51 @@ manages; this covers all other headers too.
 
 ## Development
 
-Tools and tasks are managed with [mise](https://mise.jdx.dev).
+Tools and tasks are managed with [mise](https://mise.jdx.dev). `mise.toml` pins
+each tool to a major version, and `mise.lock` pins the exact version and
+checksum for linux-x64, linux-arm64 and macos-arm64. mise skips tool releases
+younger than three days.
 
-| Task                  | What it does                                                                   |
-| --------------------- | ------------------------------------------------------------------------------ |
-| `mise run test`       | Unit tests with the Go toolchain                                               |
-| `mise run test:yaegi` | The same unit tests under Yaegi v0.16.1, the interpreter Traefik embeds        |
-| `mise run lint`       | golangci-lint, including the e2e suite                                         |
-| `mise run e2e`        | End-to-end tests against a real Traefik v3.7.9 binary, standard and fast proxy |
-| `mise run check`      | `lint`, `test` and `test:yaegi`                                                |
+| Task                    | What it does                                                                |
+| ----------------------- | --------------------------------------------------------------------------- |
+| `mise run check`        | `format:check`, `lint`, `test` and `test:yaegi`; run it before pushing     |
+| `mise run format`       | Format Go code                                                              |
+| `mise run format:check` | Check Go formatting without changing files                                  |
+| `mise run lint`         | golangci-lint (including the e2e suite), actionlint, zizmor and pinact      |
+| `mise run test`         | Unit tests with the Go toolchain                                            |
+| `mise run test:yaegi`   | The same unit tests under the Yaegi CLI                                     |
+| `mise run e2e`          | End-to-end tests against the locked Traefik binary, standard and fast proxy |
+| `mise run pin:actions`  | Pin GitHub Actions to full commit SHAs                                      |
 
-The plugin must stay compatible with Yaegi v0.16.1 and the Go 1.22 standard
-library: no generics, no `slices`, `maps` or `cmp` packages, no range over
-integers or functions, no `min`, `max` or `clear` builtins, and no goroutines.
+CI runs `lint`, `format:check`, `test`, `test:yaegi` and `e2e` as separate
+jobs.
+
+The plugin must stay compatible with the Yaegi version Traefik embeds (v0.16.1
+in Traefik v3.7) and its Go 1.22 standard library: no generics, no `slices`,
+`maps` or `cmp` packages, no range over integers or functions, no `min`, `max`
+or `clear` builtins, and no goroutines. `test:yaegi` is only meaningful while
+the Yaegi CLI matches Traefik's interpreter, so the e2e suite fails if the
+locked Yaegi CLI differs from the Yaegi version built into the locked Traefik.
+
+### Dependency updates
+
+Dependabot updates GitHub Actions weekly with a three-day cooldown, and
+`lint:pinact` rejects action pins younger than three days. To update tools,
+run `mise upgrade` (which respects the cooldown), then
+`mise lock --platform linux-x64,linux-arm64,macos-arm64`. When Traefik moves
+to a new Yaegi version, update `aqua:traefik/yaegi` in the same change.
+
+For an urgent security fix inside the cooldown window, override it for that
+one change, for example `MISE_MINIMUM_RELEASE_AGE=0 mise upgrade <tool>`, and
+say so in the pull request.
+
+### Releases
+
+[release-please](https://github.com/googleapis/release-please) maintains a
+release pull request from the [Conventional Commits](https://www.conventionalcommits.org)
+on `main`. Merging it tags the release (`vX.Y.Z`), creates the GitHub release
+and updates `CHANGELOG.md`. Before 1.0.0, `feat` commits bump the minor
+version and `fix` commits the patch version.
 
 ## License
 
