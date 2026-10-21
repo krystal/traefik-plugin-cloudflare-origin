@@ -1,0 +1,14 @@
+displayName: Cloudflare Origin
+type: middleware
+import: github.com/krystal/traefik-plugin-cloudflare-origin
+summary: >-
+  Restores the client IP from Cf-Connecting-Ip for requests that present a
+  pinned Cloudflare Authenticated Origin Pulls certificate, and restricts
+  protected hosts to those requests or to allowlisted source CIDRs.
+testData:
+  clientCertFingerprints:
+    - 0000000000000000000000000000000000000000000000000000000000000000
+  protectedHosts:
+    - protected.example.com
+  directAccessCIDRs:
+    - 192.0.2.0/24

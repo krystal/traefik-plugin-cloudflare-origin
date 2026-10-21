@@ -1,1 +1,520 @@
 # traefik-plugin-cloudflare-origin
+
+A Traefik v3 middleware plugin for origins behind Cloudflare's proxy. For
+requests that present a pinned Cloudflare Authenticated Origin Pulls (AOP)
+client certificate, it restores the client IP from `Cf-Connecting-Ip`. It can
+also restrict hosts to those requests plus an allowlist of source CIDRs.
+
+It is built and tested against Traefik v3.7.9, which runs plugins through the
+Yaegi interpreter. The plugin uses only the Go standard library.
+
+## The problem
+
+When a hostname moves behind Cloudflare, the TCP peer Traefik sees is a
+Cloudflare edge server. Applications that read `X-Forwarded-For` from the right
+and trust only the pod network then log and rate-limit the edge IP instead of
+the client.
+
+Traefik's `forwardedHeaders.trustedIPs` does not fix this. It keeps
+Cloudflare's `X-Forwarded-For` and appends the edge IP, so the rightmost entry
+is still the edge. Applications would need to trust Cloudflare's ranges, which
+is the problem described below.
+
+This plugin makes the request look as if Cloudflare were not there. On a
+request it trusts, it rewrites the request's remote address to the client IP.
+Traefik's proxy then builds `X-Forwarded-For` from that address, the plugin
+sets `X-Real-Ip` to match, and applications need no changes.
+
+## Security model
+
+**Cloudflare's IP ranges do not prove a request came through your zone.** Every
+Cloudflare customer's traffic, including Workers, leaves from the same ranges,
+and any Cloudflare account can send requests to your origin. A source IP check
+cannot tell your zone's traffic from someone else's, so it cannot tell whether
+Cloudflare set `Cf-Connecting-Ip` for one of your visitors.
+
+**Cloudflare's global AOP certificate does not prove it either.** Cloudflare
+presents the same global certificate for every zone that enables zone-level
+AOP without uploading its own certificate. An origin that trusts that
+certificate accepts requests proxied for any Cloudflare customer.
+
+**Per-zone or per-hostname AOP with your own CA does.** You create a CA, issue
+a client certificate from it, and upload that certificate to Cloudflare for
+your zone or hostname. Traefik verifies the client certificate against your
+CA, and the plugin then checks that the verified chain contains a certificate
+you pinned by SHA-256 fingerprint. Only Cloudflare's connections for your
+hostnames carry that certificate.
+
+The pin matters because Traefik's TLS options are chosen per hostname by SNI.
+An entrypoint-wide plugin instance also sees requests whose TLS option trusts
+some other client CA, such as another team's mTLS setup. Without the pin, any
+verified certificate would allow the client IP rewrite.
+
+**Same-zone Workers are inside the trust boundary.** A Worker running in your
+own zone sends its subrequests through your zone, so they carry your AOP
+certificate. Cloudflare documents that such a Worker can set the
+`CF-Connecting-IP` value through `x-real-ip`. That value can be any address,
+including one in your pod network that applications treat as internal. Only
+give Worker access to people you would trust to set the client IP.
+
+## How it works
+
+Two pieces of Traefik configuration work together:
+
+- A **TLSOption** with `clientAuth` makes Traefik ask for and verify client
+  certificates. Traefik picks the TLSOption per hostname, from the SNI in the
+  TLS handshake.
+- The plugin's **Middleware** inspects the verified certificate. You attach it
+  to an IngressRoute (router level) or to an entrypoint (every router on it).
+
+For each request, the plugin:
+
+1. Records the original remote address and `Cf-Connecting-Ip` values the first
+   time it runs in a middleware chain. Later instances in the same chain make
+   their decisions from these original values.
+2. Treats the request as verified when a verified certificate chain contains a
+   certificate whose SHA-256 fingerprint is in `clientCertFingerprints`.
+   Unverified peer certificates do not count.
+3. Deletes `True-Client-Ip`, `Cf-Connecting-Ipv6`, `Cf-Pseudo-Ipv4`, and
+   underscore variants of these and `Cf-Connecting-Ip`, on every request.
+4. On a verified request with exactly one valid `Cf-Connecting-Ip` value, sets
+   the remote address to that IP (keeping the original port) and sets
+   `X-Real-Ip` and `Cf-Connecting-Ip` to it. Otherwise it restores the
+   original remote address and the `X-Real-Ip` value Traefik set, and deletes
+   `Cf-Connecting-Ip`.
+5. Returns `403 Forbidden` when the host is protected, the request is not
+   verified, and the original peer IP is not in `directAccessCIDRs`.
+
+A verified request without a usable `Cf-Connecting-Ip` passes through with the
+edge IP as the client, unless `allowMissingClientIP` is `false`, in which case
+it gets a 403 on every host.
+
+Requests allowed through `directAccessCIDRs` are unverified, so their
+`Cf-Connecting-Ip` is never read and the backend sees their TCP source IP.
+
+When an entrypoint instance and a router instance both run, the router
+instance runs last and decides the final client IP. A router instance with a
+narrower pin can therefore undo the entrypoint instance's rewrite, and it
+gates on the original peer IP rather than the rewritten one.
+
+## Configuration
+
+- `clientCertFingerprints` (list, required): SHA-256 fingerprints of a
+  certificate's DER encoding, in hex. Colons and case are ignored. At least one
+  is required. Pin your AOP CA so leaf rotation needs no config change.
+- `protectedHosts` (list, default empty): exact hostnames to protect. Matching
+  is case-insensitive and ignores the port and trailing dots. Wildcards are not
+  supported. Leave it empty to only restore client IPs.
+- `directAccessCIDRs` (list, default empty): CIDRs or single IPs allowed to
+  reach protected hosts without a certificate, matched against the TCP peer.
+  IPv4-mapped IPv6 ranges such as `::ffff:0:0/96` are rejected; use the IPv4
+  form.
+- `protectAllHosts` (bool, default `false`): protect every request this
+  instance sees. Use it on a router-level instance so the protection follows
+  the router's match.
+- `allowMissingClientIP` (bool, default `true`): let a verified request without
+  a single valid `Cf-Connecting-Ip` value through, with the edge IP as the
+  client. Set it to `false` to reject such requests with a 403 on every host
+  this instance sees.
+
+Traefik matches these keys case-insensitively and silently ignores unknown
+keys, so check spelling against this list.
+
+The plugin fails to start an instance when a fingerprint is not 64 hex
+characters, a CIDR does not parse or is an IPv4-mapped IPv6 range, or a host
+is empty or contains `*`, `:`, `/`, whitespace or non-ASCII characters.
+Traefik then skips every router that uses that instance. For an entrypoint
+instance, that is every router on the entrypoint.
+
+## Cloudflare setup
+
+1. Create a CA and issue a client certificate from it. Keep the CA key
+   offline.
+2. Upload the client certificate and key to Cloudflare as a
+   [per-hostname](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/per-hostname/)
+   or zone-level
+   [Authenticated Origin Pulls](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/)
+   certificate, and enable it for the hostnames that should use it.
+3. Set the zone's SSL/TLS mode to Full (strict).
+4. Do not set Pseudo IPv4 to "Overwrite Headers". It replaces
+   `CF-Connecting-IP` with a Class E address.
+5. Compute the pin from your CA certificate:
+
+   ```sh
+   openssl x509 -in aop-ca.crt -noout -fingerprint -sha256
+   ```
+
+   Use the value after `sha256 Fingerprint=`. Colons are fine.
+
+To rotate the CA, list both the old and new fingerprints, roll out the new
+certificate in Cloudflare, then remove the old fingerprint.
+
+## Installing with the Traefik Helm chart
+
+Chart 41.1.1 can mount a plugin's source from a ConfigMap with the
+`inlinePlugin` type. The ConfigMap is flat, which is why the plugin's files sit
+at the root of this repository.
+
+```yaml
+experimental:
+  # Refuse to start if the plugin fails to load, instead of starting without
+  # it and skipping the routers that use it.
+  abortOnPluginFailure: true
+  localPlugins:
+    cloudflare-origin:
+      moduleName: github.com/krystal/traefik-plugin-cloudflare-origin
+      mountPath: /plugins-local/src/github.com/krystal/traefik-plugin-cloudflare-origin
+      type: inlinePlugin
+      source: {} # filled in by --set-file below
+```
+
+Pass the three plugin files from a checkout of this repository:
+
+```sh
+helm upgrade --install traefik traefik/traefik --version 41.1.1 \
+  --namespace traefik --values values.yaml \
+  --set-file 'experimental.localPlugins.cloudflare-origin.source.\.traefik\.yml=.traefik.yml' \
+  --set-file 'experimental.localPlugins.cloudflare-origin.source.go\.mod=go.mod' \
+  --set-file 'experimental.localPlugins.cloudflare-origin.source.cloudflare_origin\.go=cloudflare_origin.go'
+```
+
+The middleware examples below refer to the plugin by the name used here,
+`cloudflare-origin`.
+
+## Kubernetes examples
+
+### 1. Gate one service
+
+This is the recommended setup. One IngressRoute accepts requests from
+Cloudflare that carry your AOP certificate, and direct requests from your own
+networks. Everything else gets a 403. Only requests from Cloudflare have their
+client IP restored.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudflare-aop-ca
+  namespace: app
+type: Opaque
+stringData:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    ...your AOP CA certificate...
+    -----END CERTIFICATE-----
+---
+apiVersion: traefik.io/v1alpha1
+kind: TLSOption
+metadata:
+  name: cloudflare-aop
+  namespace: app
+spec:
+  clientAuth:
+    secretNames:
+      - cloudflare-aop-ca
+    # Direct-access clients connect without a certificate, so the plugin,
+    # not the handshake, enforces access.
+    clientAuthType: VerifyClientCertIfGiven
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: cloudflare-origin
+  namespace: app
+spec:
+  plugin:
+    cloudflare-origin:
+      clientCertFingerprints:
+        - "AB:CD:...:EF" # SHA-256 of your AOP CA certificate
+      protectAllHosts: true
+      directAccessCIDRs:
+        - 198.51.100.0/24
+        - 2001:db8:100::/56
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: app
+  namespace: app
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`app.example.com`)
+      kind: Rule
+      middlewares:
+        - name: cloudflare-origin
+      services:
+        - name: app
+          port: 80
+  tls:
+    secretName: app-example-com-tls
+    options:
+      name: cloudflare-aop
+```
+
+Every IngressRoute that serves `app.example.com` must use the same TLSOption.
+Traefik selects the TLSOption from the hostname, and conflicting options for
+one hostname fall back to the default TLSOption, which does not request client
+certificates.
+
+Direct-access clients must reach the ingress directly, not through Cloudflare.
+Use split DNS so `app.example.com` resolves to the ingress inside your
+networks, or add an internal hostname to the same route so it shares the
+middleware:
+
+```yaml
+    - match: Host(`app.example.com`) || Host(`app.internal.example.com`)
+```
+
+### 2. Cloudflare-proxied but open
+
+To restore client IPs without restricting access, leave out
+`protectAllHosts`. The host still needs a TLSOption that requests client
+certificates, because the plugin only trusts `Cf-Connecting-Ip` on verified
+requests.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudflare-aop-ca
+  namespace: www
+type: Opaque
+stringData:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    ...your AOP CA certificate...
+    -----END CERTIFICATE-----
+---
+apiVersion: traefik.io/v1alpha1
+kind: TLSOption
+metadata:
+  name: cloudflare-aop
+  namespace: www
+spec:
+  clientAuth:
+    secretNames:
+      - cloudflare-aop-ca
+    clientAuthType: VerifyClientCertIfGiven
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: cloudflare-origin
+  namespace: www
+spec:
+  plugin:
+    cloudflare-origin:
+      clientCertFingerprints:
+        - "AB:CD:...:EF"
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: www
+  namespace: www
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`www.example.com`)
+      kind: Rule
+      middlewares:
+        - name: cloudflare-origin
+      services:
+        - name: www
+          port: 80
+  tls:
+    secretName: www-example-com-tls
+    options:
+      name: cloudflare-aop
+```
+
+### 3. Advanced: entrypoint-wide restoration with per-service gates
+
+An instance attached to the entrypoint restores client IPs for every
+Cloudflare-proxied host without per-route changes. Protection then comes from
+either `protectedHosts` on that instance, as below, or router-level instances
+as in example 1, which can be combined with it.
+
+This has a larger blast radius. The entrypoint instance runs for every router
+on the entrypoint, and if it fails to start, or the Middleware is missing,
+Traefik skips every router on that entrypoint.
+
+Create the Middleware first, in the Traefik namespace:
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: cloudflare-origin
+  namespace: traefik
+spec:
+  plugin:
+    cloudflare-origin:
+      clientCertFingerprints:
+        - "AB:CD:...:EF"
+      protectedHosts:
+        - app.example.com
+        - admin.example.com
+      directAccessCIDRs:
+        - 198.51.100.0/24
+```
+
+Then reference it from the chart values as `<namespace>-<name>@kubernetescrd`:
+
+```yaml
+ports:
+  websecure:
+    http:
+      middlewares:
+        - traefik-cloudflare-origin@kubernetescrd
+```
+
+Each Cloudflare-proxied hostname still needs a TLSOption that requests and
+verifies client certificates against your AOP CA, as in example 1. To cover
+every hostname that has no TLSOption of its own, name the TLSOption `default`.
+Only one TLSOption named `default` may exist across all namespaces. Traefik
+then asks every client of those hostnames for a certificate, including
+visitors who connect directly. Browsers that hold client certificates may show
+a certificate prompt, so prefer per-hostname TLSOptions when direct visitors
+use them.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudflare-aop-ca
+  namespace: traefik
+type: Opaque
+stringData:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    ...your AOP CA certificate...
+    -----END CERTIFICATE-----
+---
+apiVersion: traefik.io/v1alpha1
+kind: TLSOption
+metadata:
+  name: default
+  namespace: traefik
+spec:
+  clientAuth:
+    secretNames:
+      - cloudflare-aop-ca
+    clientAuthType: VerifyClientCertIfGiven
+```
+
+## File provider
+
+The same configuration works with the file provider. Traefik loads local
+plugins from `plugins-local/src/<moduleName>` under its working directory, so
+copy the three plugin files into
+`plugins-local/src/github.com/krystal/traefik-plugin-cloudflare-origin`.
+
+```yaml
+# Static configuration
+experimental:
+  abortOnPluginFailure: true
+  localPlugins:
+    cloudflare-origin:
+      moduleName: github.com/krystal/traefik-plugin-cloudflare-origin
+```
+
+```yaml
+# Dynamic configuration
+http:
+  middlewares:
+    cloudflare-origin:
+      plugin:
+        cloudflare-origin:
+          clientCertFingerprints: ["AB:CD:...:EF"]
+          protectAllHosts: true
+          directAccessCIDRs: ["198.51.100.0/24"]
+  routers:
+    app:
+      rule: Host(`app.example.com`)
+      service: app
+      middlewares: [cloudflare-origin]
+      tls:
+        options: cloudflare-aop
+  services:
+    app:
+      loadBalancer:
+        servers:
+          - url: http://127.0.0.1:8080
+tls:
+  options:
+    cloudflare-aop:
+      clientAuth:
+        caFiles: [/etc/traefik/aop-ca.crt]
+        clientAuthType: VerifyClientCertIfGiven
+```
+
+## Access logs
+
+Traefik's `ClientHost` and `ClientAddr` access log fields record the TCP peer,
+which stays the Cloudflare edge IP. Keep the request headers the plugin sets to
+record the client IP:
+
+```yaml
+accessLog:
+  fields:
+    headers:
+      names:
+        Cf-Connecting-Ip: keep
+        X-Real-Ip: keep
+```
+
+## Hardening
+
+Set `ports.websecure.http.underscoreHeadersStrategy: delete` (Traefik v3.7.6+,
+chart 41.1.1) to drop every header with an underscore in its name before
+routing. The plugin already removes underscore variants of the headers it
+manages; this covers all other headers too.
+
+## Deployment preconditions
+
+- In entrypoint mode, attach the plugin to every entrypoint that routes to a
+  protected service, and list it first so later middlewares see the restored
+  client IP.
+- Protected routers should use exact `Host()` rules. For `HostRegexp` or
+  wildcard routers, use a router-level instance with `protectAllHosts`.
+- Keep Traefik's `cnameFlattening` off. It lets a CNAME alias match a protected
+  `Host()` rule under a name that `protectedHosts` does not list.
+- Keep `forwardedHeaders.notAppendXForwardedFor` off, or Traefik will not add
+  the restored client IP to `X-Forwarded-For`.
+- Keep HTTP/3 off. It is untested with this plugin.
+- TCP routers with `HostSNI` rules bypass HTTP middlewares, including this one.
+- `directAccessCIDRs` must not overlap node or load balancer SNAT ranges, or
+  every request arriving through SNAT counts as direct access. Use
+  `externalTrafficPolicy: Local` or the PROXY protocol so Traefik sees real
+  source IPs.
+- Set Cloudflare's SSL/TLS mode to Full (strict), and do not set Pseudo IPv4 to
+  "Overwrite Headers".
+- HTTP-01 ACME challenges get a 403 if the plugin is on that entrypoint and the
+  host is protected, because Let's Encrypt's validation servers are neither
+  Cloudflare nor in `directAccessCIDRs`.
+- Router `ClientIP()` rules match before middlewares run, so they see the edge
+  IP. `ipAllowList` middlewares placed after the plugin see the restored IP.
+
+## Development
+
+Tools and tasks are managed with [mise](https://mise.jdx.dev).
+
+| Task                  | What it does                                                                   |
+| --------------------- | ------------------------------------------------------------------------------ |
+| `mise run test`       | Unit tests with the Go toolchain                                               |
+| `mise run test:yaegi` | The same unit tests under Yaegi v0.16.1, the interpreter Traefik embeds        |
+| `mise run lint`       | golangci-lint, including the e2e suite                                         |
+| `mise run e2e`        | End-to-end tests against a real Traefik v3.7.9 binary, standard and fast proxy |
+| `mise run check`      | `lint`, `test` and `test:yaegi`                                                |
+
+The plugin must stay compatible with Yaegi v0.16.1 and the Go 1.22 standard
+library: no generics, no `slices`, `maps` or `cmp` packages, no range over
+integers or functions, no `min`, `max` or `clear` builtins, and no goroutines.
+
+## License
+
+[MIT](LICENSE)
