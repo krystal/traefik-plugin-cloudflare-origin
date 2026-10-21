@@ -672,6 +672,109 @@ func TestNewValidation(t *testing.T) {
 	})
 }
 
+func TestRevokedCertFingerprints(t *testing.T) {
+	rewritten := expect{
+		status: http.StatusOK, remoteAddr: "203.0.113.7:44321", realIP: "203.0.113.7", cfIP: "203.0.113.7",
+	}
+	tests := []struct {
+		name    string
+		revoked *x509.Certificate
+		tls     *tls.ConnectionState
+		host    string
+		peer    string
+		want    expect
+	}{
+		{"revoked leaf on protected host", aopLeaf, aopChain(), protectedHost, edgePeer, expect{
+			status: http.StatusForbidden,
+		}},
+		{"revoked leaf on open host", aopLeaf, aopChain(), openHost, edgePeer, expect{
+			status: http.StatusOK, remoteAddr: edgePeer, realIP: edgeIP,
+		}},
+		{"revoked leaf from direct CIDR", aopLeaf, aopChain(), protectedHost, "192.0.2.10:5555", expect{
+			status: http.StatusOK, remoteAddr: "192.0.2.10:5555", realIP: "192.0.2.10",
+		}},
+		{"revoked intermediate", aopInter, aopChain(), protectedHost, edgePeer, expect{
+			status: http.StatusForbidden,
+		}},
+		// A pin in the first chain must not outweigh a revoked certificate in
+		// an alternate chain.
+		{"revoked intermediate in alternate chain", aopInter, verifiedState(
+			[]*x509.Certificate{aopLeaf, aopRoot},
+			[]*x509.Certificate{aopLeaf, aopInter, aopRoot},
+		), protectedHost, edgePeer, expect{status: http.StatusForbidden}},
+		{"sibling of revoked leaf", aopLeaf, verifiedState(
+			[]*x509.Certificate{aopOtherLeaf, aopInter, aopRoot},
+		), protectedHost, edgePeer, rewritten},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := &backend{}
+			cfg := baseConfig()
+			cfg.RevokedCertFingerprints = []string{fingerprint(tt.revoked)}
+			h := mustNew(t, b.handler(), cfg)
+			rec := serve(h, request{
+				host: tt.host, remoteAddr: tt.peer, tls: tt.tls,
+				header: map[string][]string{cfConnectingIP: {"203.0.113.7"}},
+			})
+			assertResult(t, rec, b, tt.want)
+		})
+	}
+
+	// The router instance runs last, so its revocation must undo the
+	// entrypoint instance's rewrite.
+	t.Run("router instance revokes after entrypoint rewrite", func(t *testing.T) {
+		b := &backend{}
+		routerCfg := baseConfig()
+		routerCfg.RevokedCertFingerprints = []string{fingerprint(aopLeaf)}
+		router := mustNew(t, b.handler(), routerCfg)
+		h := mustNew(t, router, baseConfig())
+		rec := serve(h, request{
+			host: openHost, remoteAddr: edgePeer, tls: aopChain(),
+			header: map[string][]string{cfConnectingIP: {"203.0.113.7"}},
+		})
+		assertResult(t, rec, b, expect{status: http.StatusOK, remoteAddr: edgePeer, realIP: edgeIP})
+	})
+}
+
+func TestNewRevokedValidation(t *testing.T) {
+	pin := fingerprint(aopRoot)
+	colons := strings.ToUpper(pin)
+	var parts []string
+	for i := 0; i < len(colons); i += 2 {
+		parts = append(parts, colons[i:i+2])
+	}
+	tests := []struct {
+		name    string
+		revoked []string
+		wantErr string
+	}{
+		{"blank revoked fingerprint", []string{" "}, "revokedCertFingerprints"},
+		{"non-hex revoked fingerprint", []string{strings.Repeat("zz", 32)}, "revokedCertFingerprints"},
+		{"short revoked fingerprint", []string{pin[:62]}, "revokedCertFingerprints"},
+		{"long revoked fingerprint", []string{pin + "00"}, "revokedCertFingerprints"},
+		{"revoked fingerprint is pinned", []string{pin}, "in both"},
+		{"revoked fingerprint is pinned in another form", []string{" " + strings.Join(parts, ":") + " "}, "in both"},
+		{"valid", []string{fingerprint(aopLeaf), fingerprint(aopInter)}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := CreateConfig()
+			cfg.ClientCertFingerprints = []string{pin}
+			cfg.RevokedCertFingerprints = tt.revoked
+			_, err := New(context.Background(), http.NotFoundHandler(), cfg, "test")
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("New: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want one containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // Pin removal must revoke the old chain on its own; the new chain needs no
 // other change. Resumed states replay the original handshake's
 // VerifiedChains, so they must be judged against the current pins too. The

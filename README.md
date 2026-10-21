@@ -141,7 +141,15 @@ gates on the original peer IP rather than the rewritten one.
 
 - `clientCertFingerprints` (list, required): SHA-256 fingerprints of a
   certificate's DER encoding, in hex. Colons and case are ignored. At least one
-  is required. Pin your AOP CA so leaf rotation needs no config change.
+  is required. Pin your AOP CA so leaf rotation needs no config change; see
+  [Pin the CA or the client certificate](#pin-the-ca-or-the-client-certificate).
+- `revokedCertFingerprints` (list, default empty): fingerprints of
+  certificates to stop trusting, in the same format. A request is not verified
+  when any certificate in any of its verified chains matches one, even if
+  another certificate is pinned. It is then handled like any other unverified
+  request. Use it to [revoke a leaked client
+  certificate](#revoke-a-leaked-client-certificate) while you keep the CA
+  pinned.
 - `protectedHosts` (list, default empty): exact hostnames to protect. Matching
   is case-insensitive and ignores the port and trailing dots. Wildcards are not
   supported. Leave it empty to only restore client IPs.
@@ -161,16 +169,18 @@ Traefik matches these keys case-insensitively and silently ignores unknown
 keys, so check spelling against this list.
 
 Traefik refuses to create an instance when a fingerprint is not 64 hex
-characters, a CIDR does not parse or is an IPv4-mapped IPv6 range, or a host
-is empty or contains `*`, `:`, `/`, whitespace or non-ASCII characters. It
-then skips every router that uses that instance. For an entrypoint instance,
-that is every router on the entrypoint.
+characters or is in both `clientCertFingerprints` and
+`revokedCertFingerprints`, a CIDR does not parse or is an IPv4-mapped IPv6
+range, or a host is empty or contains `*`, `:`, `/`, whitespace or non-ASCII
+characters. It then skips every router that uses that instance. For an
+entrypoint instance, that is every router on the entrypoint.
 
 ## Set up Cloudflare
 
 1. Create a CA and issue a client certificate from it. Keep the CA key
    offline, and use the CA only for AOP: the plugin trusts every certificate
-   it signs.
+   it signs. Give the client certificate a short lifetime, because it stays
+   trusted until it expires even after you replace it in Cloudflare.
 2. Upload the client certificate and key to Cloudflare as a
    [per-hostname](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/per-hostname/)
    or zone-level
@@ -187,6 +197,46 @@ that is every router on the entrypoint.
 
    Use the value after `Fingerprint=`. Colons are fine.
 
+### Pin the CA or the client certificate
+
+The pin can be any certificate in the verified chain. Traefik still verifies
+the chain against the CA in the TLSOption either way.
+
+- **Pin the CA** (recommended): routine client certificate rotation needs no
+  config change. Every certificate the CA has signed stays trusted until it
+  expires, including certificates you have replaced in Cloudflare.
+- **Pin the client certificate** (the leaf): removing its fingerprint stops
+  trusting it at once. Every routine rotation then needs the same overlap as a
+  CA rotation: list both fingerprints, roll out the new certificate in
+  Cloudflare, and remove the old fingerprint.
+
+Pinning the CA with short client certificate lifetimes keeps rotation simple,
+and `revokedCertFingerprints` covers the emergency case.
+
+### Revoke a leaked client certificate
+
+Replacing the client certificate in Cloudflare does not revoke the old one.
+Traefik does not check CRLs or OCSP for client certificates, and with the CA
+pinned the plugin trusts every certificate the CA has signed. Anyone holding
+the old certificate and its key can connect to the origin directly, pass as
+Cloudflare, set any `Cf-Connecting-Ip` value, and get past `protectedHosts` and
+`protectAllHosts`.
+
+If a client certificate's key leaks:
+
+1. Issue a new client certificate and roll it out in Cloudflare.
+2. Compute the old certificate's fingerprint with the `openssl` command above,
+   and add it to `revokedCertFingerprints`. Do this on every instance that
+   pins the CA or an intermediate: each instance applies only its own list, so
+   an instance without the entry still trusts the certificate. Until Cloudflare
+   uses the new certificate, its requests are unverified, so add the entry
+   first only if blocking Cloudflare's requests in the meantime is acceptable.
+3. Keep the entry until the old certificate expires. Traefik then rejects it
+   during the TLS handshake.
+
+Alternatively, [rotate the CA](#rotate-the-ca), which revokes every
+certificate the old CA signed.
+
 ### Rotate the CA
 
 1. Trust both CAs in Traefik. Add a Secret for the new CA to the TLSOption's
@@ -195,10 +245,12 @@ that is every router on the entrypoint.
    the TLS handshake, before the plugin can check it.
 2. List both the old and new fingerprints in `clientCertFingerprints`.
 3. Roll out the new client certificate in Cloudflare.
-4. Remove the old fingerprint and the old CA from Traefik.
+4. Remove the old fingerprint and the old CA from Traefik, along with any
+   `revokedCertFingerprints` entries for certificates the old CA signed.
 
-Rotating only the leaf certificate under an unchanged CA needs none of this
-when you pin the CA.
+Rotating only the client certificate under an unchanged CA needs none of this
+when you pin the CA, but it does not revoke the old client certificate. See
+[Revoke a leaked client certificate](#revoke-a-leaked-client-certificate).
 
 ## Install the plugin
 
@@ -656,6 +708,48 @@ Set `ports.websecure.http.underscoreHeadersStrategy: delete` (Traefik v3.7.6+,
 chart 41.1.1) to drop every header with an underscore in its name before
 routing. The plugin already removes underscore variants of the headers it
 manages; this covers all other headers too.
+
+The plugin manages only these headers:
+
+- `Cf-Connecting-Ip` and `X-Real-Ip`, which it sets to the client IP on
+  verified requests. Otherwise it deletes `Cf-Connecting-Ip` and restores the
+  `X-Real-Ip` value Traefik set.
+- `True-Client-Ip`, `Cf-Connecting-Ipv6` and `Cf-Pseudo-Ipv4`, which it deletes
+  on every request, along with underscore variants of these and
+  `Cf-Connecting-Ip`.
+
+Traefik's forwarded headers handling covers `X-Forwarded-*` and `X-Real-Ip`.
+Every other header a client sends reaches the backend unchanged, on open hosts
+and from `directAccessCIDRs` peers alike. That includes:
+
+- other Cloudflare headers, such as `CF-IPCountry`, `CF-Visitor`, `Cf-Ray` and
+  `Cf-Worker`;
+- other client-IP headers, such as `Forwarded` (RFC 7239), `X-Client-Ip`,
+  `Client-Ip` and `X-Cluster-Client-Ip`.
+
+A direct client can set any of these, so applications should not trust them.
+The plugin leaves them alone because removing them would also break setups
+where a trusted internal proxy sets them. To remove them, add a `headers`
+middleware after the plugin. An empty value deletes the header:
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-client-headers
+  namespace: app
+spec:
+  headers:
+    customRequestHeaders:
+      CF-IPCountry: ""
+      CF-Visitor: ""
+      Cf-Ray: ""
+      Cf-Worker: ""
+      Forwarded: ""
+      X-Client-Ip: ""
+      Client-Ip: ""
+      X-Cluster-Client-Ip: ""
+```
 
 ## Development
 
