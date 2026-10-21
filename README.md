@@ -768,6 +768,8 @@ younger than three days, and CI applies the same cooldown to the mise binary.
 | `mise run test`         | Unit tests with the Go toolchain                                            |
 | `mise run test:yaegi`   | The same unit tests under the Yaegi CLI                                     |
 | `mise run e2e`          | End-to-end tests against the locked Traefik binary, standard and fast proxy |
+| `mise run e2e:canary`   | The same end-to-end tests against the canary Traefik in `mise.canary.toml`  |
+| `mise run canary:use`   | Pin the canary to a Traefik release and its Yaegi, and lock both            |
 | `mise run pin:actions`  | Pin GitHub Actions to full commit SHAs                                      |
 
 CI runs `lint`, `format:check`, `test`, `test:yaegi` and `e2e` as separate
@@ -804,6 +806,39 @@ For an urgent security fix inside the cooldown window, override it for that
 one change, for example `MISE_MINIMUM_RELEASE_AGE=0 mise upgrade <tool>`, and
 say so in the pull request.
 
+### Traefik canary
+
+The Traefik canary runs the full e2e suite against a second, exact Traefik
+version and its matching Yaegi CLI, so Traefik changes surface before the
+baseline moves. `mise.canary.toml` pins both versions and `mise.canary.lock`
+records their checksums. mise loads them on top of `mise.toml` and `mise.lock`
+when `MISE_ENV=canary` is set, which is what `mise run e2e:canary` does.
+
+The `Traefik canary` workflow runs weekly, on manual dispatch, and on pull
+requests that change the canary's files. It installs from the lockfiles in
+locked mode with read-only permissions, as CI does, and its job summary names
+the Traefik and Yaegi versions it tested. It is not a required check, so a
+failure flags an incompatibility without blocking unrelated pull requests.
+
+The `Traefik canary bump` workflow moves the canary forward. Every Monday, and
+on manual dispatch from `main`, it runs `mise run canary:use`. When that selects
+a newer Traefik release, it opens or updates a pull request from the
+`canary/traefik-bump` branch, where the canary workflow tests the new version.
+It authenticates as the release-please GitHub App from the `release`
+environment, so the pull request triggers CI, and it commits through the
+GitHub API, so GitHub signs the commit as the App. The workflow owns that
+branch and replaces its commits on each run, so make fixes for a new Traefik
+version in a separate pull request.
+
+To move the canary by hand, run `mise run canary:use` for the newest Traefik
+3.x release outside the cooldown, or pass a version, such as
+`mise run canary:use 3.7.15`. The task pins that Traefik and the Yaegi version
+built into it, and locks both for all three platforms. Commit
+`mise.canary.toml` and `mise.canary.lock` together. When the canary is green
+and the project should support that Traefik version, update `mise.lock` in a
+normal pull request so the blocking e2e job tests it before the documentation
+claims support.
+
 ### Releases
 
 [release-please](https://github.com/googleapis/release-please) maintains a
@@ -816,11 +851,13 @@ version, and `feat` and `fix` commits bump the patch version.
 The release-please job runs last in CI, only after every other job passes on a
 push to `main` or a `release-X.Y.x` maintenance branch. It runs in the
 `release` environment and authenticates as a GitHub App, so its release pull
-requests trigger CI. It needs:
+requests trigger CI. The canary bump workflow uses the same environment and
+App. They need:
 
 - a GitHub App installed on this repository with read and write access to
-  contents, issues and pull requests, which the job requests when it creates
-  the App token; and
+  contents, issues and pull requests, which the release-please job requests
+  when it creates the App token, while the canary bump job requests only
+  contents and pull requests; and
 - a `release` environment with a deployment branch policy that allows only
   `main` and `release-*.x`, the App's client ID in the
   `RELEASE_PLEASE_GITHUB_CLIENT_ID` variable, and the App's private key in the
