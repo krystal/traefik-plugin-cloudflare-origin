@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -195,6 +196,35 @@ func writeAPIError(w http.ResponseWriter, status, code int, msg string) {
 		"success": false,
 		"errors":  []any{map[string]any{"code": code, "message": msg}},
 	})
+}
+
+// writeCutOff sends the headers and the start of a JSON body, then closes
+// the connection, so reading the body fails with io.ErrUnexpectedEOF.
+func writeCutOff(t *testing.T, w http.ResponseWriter, status int) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", "1000")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, `{"success":true,"result":{"id":"`)
+	w.(http.Flusher).Flush()
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		t.Errorf("hijack: %v", err)
+		return
+	}
+	_ = conn.Close()
+}
+
+// resetConnection resets the connection before any response is sent.
+func resetConnection(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		t.Errorf("hijack: %v", err)
+		return
+	}
+	_ = conn.(*net.TCPConn).SetLinger(0)
+	_ = conn.Close()
 }
 
 func certJSON(c *fakeCert, status string) map[string]any {

@@ -97,7 +97,9 @@ func (m *apiMessages) UnmarshalJSON(data []byte) error {
 }
 
 type envelope struct {
-	Success    bool            `json:"success"`
+	// Success is nil when the field is missing, so the body is not an
+	// envelope.
+	Success    *bool           `json:"success"`
 	Errors     apiMessages     `json:"errors"`
 	Messages   apiMessages     `json:"messages"`
 	Result     json.RawMessage `json:"result"`
@@ -112,11 +114,14 @@ type envelope struct {
 type apiError struct {
 	method string
 	path   string
-	// status is 0 when no response arrived.
+	// status is 0 when no response headers arrived.
 	status   int
 	codes    []int
 	messages []string
 	detail   string
+	// transport is set when no complete response arrived: the request
+	// failed before the headers, or reading the body failed.
+	transport bool
 	// decoded is set when the response was a Cloudflare envelope.
 	decoded bool
 	err     error
@@ -155,9 +160,11 @@ func (e *apiError) hasCode(code int) bool {
 	return false
 }
 
+// isNotFound reports a Cloudflare 404. A 404 that is not an envelope, such
+// as an intermediary's error page, does not count.
 func isNotFound(err error) bool {
 	var apiErr *apiError
-	return errors.As(err, &apiErr) && apiErr.status == http.StatusNotFound
+	return errors.As(err, &apiErr) && apiErr.decoded && apiErr.status == http.StatusNotFound
 }
 
 var (
@@ -217,25 +224,39 @@ func (c *cfClient) do(ctx context.Context, method, path string, query url.Values
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := c.http.Do(req)
-	if err != nil {
+	transportErr := func(status int, err error) (int, error) {
 		// url.Error includes the full URL, and with it the zone ID.
 		var urlErr *url.Error
 		if errors.As(err, &urlErr) {
 			err = urlErr.Err
 		}
-		return fail(&apiError{detail: c.sanitize(err.Error()), err: err})
+		return fail(&apiError{status: status, transport: true, detail: c.sanitize(err.Error()), err: err})
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return transportErr(0, err)
 	}
 	defer resp.Body.Close()
 
-	var env envelope
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&env); err != nil {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return transportErr(resp.StatusCode, err)
+	}
+	malformed := func(reason string) (int, error) {
 		return fail(&apiError{
 			status: resp.StatusCode,
-			detail: c.sanitize(fmt.Sprintf("undecodable response (content type %q)", resp.Header.Get("Content-Type"))),
+			detail: c.sanitize(fmt.Sprintf("%s (content type %q)", reason, resp.Header.Get("Content-Type"))),
 		})
 	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 || !env.Success {
+	if len(data) > maxResponseBytes {
+		return malformed("response too large")
+	}
+	var env envelope
+	if err := json.Unmarshal(data, &env); err != nil || env.Success == nil {
+		return malformed("undecodable response")
+	}
+	success := *env.Success
+	if resp.StatusCode < 200 || resp.StatusCode > 299 || !success {
 		e := &apiError{status: resp.StatusCode, decoded: true}
 		for _, m := range append(env.Errors, env.Messages...) {
 			if m.Code != 0 {
@@ -245,7 +266,7 @@ func (c *cfClient) do(ctx context.Context, method, path string, query url.Values
 				e.messages = append(e.messages, c.sanitize(m.Message))
 			}
 		}
-		if !env.Success && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		if !success && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
 			e.detail = "request unsuccessful"
 		}
 		return fail(e)

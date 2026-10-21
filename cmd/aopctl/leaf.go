@@ -181,8 +181,7 @@ func isTransient(err error) bool {
 	if !errors.As(err, &apiErr) {
 		return false
 	}
-	return apiErr.status == http.StatusTooManyRequests || apiErr.status >= 500 ||
-		(apiErr.status == 0 && apiErr.err != nil)
+	return apiErr.transport || apiErr.status == http.StatusTooManyRequests || apiErr.status >= 500
 }
 
 // waitForCert polls an uploaded certificate until it is active.
@@ -429,6 +428,8 @@ type rollout struct {
 	observed map[string]*association
 	// signed records which listed certificates AOP_CA_CERT signed.
 	signed map[string]bool
+	// associateSent is set once the association PUT has been attempted.
+	associateSent bool
 }
 
 func (a *app) rollOut(ctx context.Context, cf *cfClient, r *rollout) error {
@@ -440,6 +441,7 @@ func (a *app) rollOut(ctx context.Context, cf *cfClient, r *rollout) error {
 		return err
 	}
 	fmt.Fprintf(a.stderr, "Pointing %d hostnames at %s.\n", len(r.hosts), r.certID)
+	r.associateSent = true
 	if err := cf.associate(ctx, r.certID, r.hosts); err != nil {
 		// The request may have been partly applied.
 		for _, h := range r.hosts {
@@ -463,6 +465,13 @@ func (r *rollout) report(w io.Writer) {
 			observed = describeAssociation(assoc)
 		}
 		fmt.Fprintf(w, "  %s: %s -> %s\n", h, describeAssociation(r.original[h]), observed)
+	}
+	if !r.associateSent {
+		// The certificate never became active, so leaf associate would
+		// refuse it and there is nothing to roll back.
+		fmt.Fprintf(w, "No hostname was changed. If certificate %s becomes active later, point the listed hostnames at it with:\n  aopctl leaf associate --cert-id %s%s\n", r.certID, r.certID, hostnameFlags(r.hosts))
+		fmt.Fprintf(w, "Otherwise, delete it and run aopctl leaf issue again:\n  aopctl leaf prune --cert-id %s%s\n", r.certID, hostnameFlags(r.hosts))
+		return
 	}
 	fmt.Fprintf(w, "To resume, run:\n  aopctl leaf associate --cert-id %s%s\n", r.certID, hostnameFlags(r.hosts))
 

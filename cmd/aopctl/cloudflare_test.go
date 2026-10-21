@@ -98,6 +98,86 @@ func TestClientErrors(t *testing.T) {
 	}
 }
 
+// TestResponseClassification checks which failed responses polling retries
+// and which count as a Cloudflare 404.
+func TestResponseClassification(t *testing.T) {
+	tests := []struct {
+		name      string
+		handler   http.HandlerFunc
+		want      string
+		transient bool
+		notFound  bool
+	}{
+		{
+			name:      "connection reset",
+			handler:   func(w http.ResponseWriter, _ *http.Request) { resetConnection(t, w) },
+			transient: true,
+		},
+		{
+			name:      "body cut off",
+			handler:   func(w http.ResponseWriter, _ *http.Request) { writeCutOff(t, w, http.StatusOK) },
+			want:      "HTTP 200: unexpected EOF",
+			transient: true,
+		},
+		{
+			name: "no success field",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				writeRaw(w, http.StatusOK, "application/json", `{"result":{"id":"x"}}`)
+			},
+			want: `HTTP 200: undecodable response (content type "application/json")`,
+		},
+		{
+			name: "too large",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				body := `{"success":true,"errors":[],"messages":[],"result":{}}`
+				writeRaw(w, http.StatusOK, "application/json", body+strings.Repeat(" ", maxResponseBytes+1-len(body)))
+			},
+			want: `HTTP 200: response too large (content type "application/json")`,
+		},
+		{
+			name: "non-JSON 503",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				writeRaw(w, http.StatusServiceUnavailable, "text/html", "<html>busy</html>")
+			},
+			want:      "HTTP 503: undecodable response",
+			transient: true,
+		},
+		{
+			name: "non-JSON 404",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				writeRaw(w, http.StatusNotFound, "text/html", "<html>Not Found</html>")
+			},
+			want: "HTTP 404: undecodable response",
+		},
+		{
+			name: "Cloudflare 404",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				writeAPIError(w, http.StatusNotFound, 1551, "certificate not found")
+			},
+			want:     "HTTP 404 (code 1551): certificate not found",
+			notFound: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cf := newTestClient(t, tt.handler)
+			_, err := cf.getCert(context.Background(), "x")
+			if err == nil {
+				t.Fatal("getCert succeeded, want an error")
+			}
+			if !strings.Contains(err.Error(), tt.want) || strings.Contains(err.Error(), testZone) {
+				t.Errorf("err = %q, want it to contain %q and not the zone ID", err, tt.want)
+			}
+			if got := isTransient(err); got != tt.transient {
+				t.Errorf("isTransient = %v, want %v", got, tt.transient)
+			}
+			if got := isNotFound(err); got != tt.notFound {
+				t.Errorf("isNotFound = %v, want %v", got, tt.notFound)
+			}
+		})
+	}
+}
+
 // TestErrorsRedactSecrets uses a server that echoes the request body, the
 // token and the zone ID back in the envelope's messages.
 func TestErrorsRedactSecrets(t *testing.T) {

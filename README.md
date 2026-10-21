@@ -947,6 +947,11 @@ During a [CA rotation](#rotate-the-ca), the hostnames' original certificates
 are the old CA's, so run the rollback commands with `AOP_CA_CERT` set to the
 old CA. `leaf issue` marks each command that needs this.
 
+If the new certificate never becomes active, `leaf issue` changes no hostname,
+so there is nothing to resume or roll back. It prints the `aopctl leaf prune`
+command that deletes the certificate, so you can run `leaf issue` again, and
+the `aopctl leaf associate` command to use if it becomes active later.
+
 If the upload fails without a usable response, for example on a timeout,
 `leaf issue` reports that the outcome is unknown. Cloudflare may have created
 the certificate, so run `aopctl leaf status` before you retry.

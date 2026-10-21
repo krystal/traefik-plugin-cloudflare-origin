@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -188,13 +187,7 @@ func TestLeafIssueFailures(t *testing.T) {
 			if r.Method != http.MethodPost {
 				return false
 			}
-			conn, _, err := w.(http.Hijacker).Hijack()
-			if err != nil {
-				t.Errorf("hijack: %v", err)
-				return true
-			}
-			_ = conn.(*net.TCPConn).SetLinger(0)
-			_ = conn.Close()
+			resetConnection(t, w)
 			return true
 		}
 		code, _, stderr := h.run("leaf", "issue")
@@ -203,6 +196,24 @@ func TestLeafIssueFailures(t *testing.T) {
 		}
 		if strings.Contains(stderr, "To resume") {
 			t.Errorf("printed recovery commands without a certificate ID:\n%s", stderr)
+		}
+		if n := h.fake.count(http.MethodPut, "/hostnames"); n != 0 {
+			t.Errorf("sent %d PUTs", n)
+		}
+	})
+
+	t.Run("upload body cut off", func(t *testing.T) {
+		h := issueHarness(t)
+		h.fake.hook = func(w http.ResponseWriter, r *http.Request, _ []byte) bool {
+			if r.Method != http.MethodPost {
+				return false
+			}
+			writeCutOff(t, w, http.StatusOK)
+			return true
+		}
+		code, _, stderr := h.run("leaf", "issue")
+		if code != 1 || !strings.Contains(stderr, "upload outcome unknown") || !strings.Contains(stderr, "HTTP 200: unexpected EOF") {
+			t.Errorf("exit %d; stderr:\n%s", code, stderr)
 		}
 		if n := h.fake.count(http.MethodPut, "/hostnames"); n != 0 {
 			t.Errorf("sent %d PUTs", n)
@@ -268,6 +279,36 @@ func TestLeafIssueFailures(t *testing.T) {
 		if n := h.fake.count(http.MethodPut, "/hostnames"); n != 0 {
 			t.Errorf("sent %d PUTs", n)
 		}
+		// leaf associate refuses a certificate that is not active, and no
+		// hostname changed, so there is nothing to resume or roll back.
+		for _, unwanted := range []string{"To resume", "To roll back"} {
+			if strings.Contains(stderr, unwanted) {
+				t.Errorf("stderr has %q:\n%s", unwanted, stderr)
+			}
+		}
+		hosts := " --hostname a.example.com --hostname b.example.com --hostname c.example.com --hostname d.example.com\n"
+		for _, want := range []string{
+			"No hostname was changed.",
+			"If certificate new-1 becomes active later",
+			"aopctl leaf associate --cert-id new-1" + hosts,
+			"aopctl leaf prune --cert-id new-1" + hosts,
+		} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("stderr lacks %q:\n%s", want, stderr)
+			}
+		}
+
+		prune := commandLines(stderr, "aopctl leaf prune --cert-id new-1")
+		if len(prune) != 1 {
+			t.Fatalf("want one prune command, got %q", prune)
+		}
+		h.openTTY = func() (io.ReadWriteCloser, error) { return &fakeTTY{Reader: strings.NewReader("y\n")}, nil }
+		if code, _, stderr := h.run(prune[0]...); code != 0 {
+			t.Fatalf("prune: exit %d; stderr:\n%s", code, stderr)
+		}
+		if d := deletes(h); strings.Join(d, ",") != "new-1" {
+			t.Errorf("deleted %v, want new-1", d)
+		}
 	})
 
 	t.Run("PUT fails", func(t *testing.T) {
@@ -282,6 +323,10 @@ func TestLeafIssueFailures(t *testing.T) {
 		code, _, stderr := h.run("leaf", "issue")
 		if code != 1 {
 			t.Fatalf("exit %d; stderr:\n%s", code, stderr)
+		}
+		// A PUT is not a polling read, so a 5xx is not retried.
+		if n := h.fake.count(http.MethodPut, "/hostnames"); n != 1 {
+			t.Errorf("sent %d PUTs, want 1", n)
 		}
 		for _, want := range []string{
 			"New certificate: new-1",
@@ -441,6 +486,97 @@ func TestLeafIssueTransientPolling(t *testing.T) {
 		failFirst(h, "/certificates/new-1", false, http.StatusBadRequest)
 		code, _, stderr := h.run("leaf", "issue")
 		if code != 1 || !strings.Contains(stderr, "check certificate new-1: GET /zones/{zone}/origin_tls_client_auth/hostnames/certificates/new-1: HTTP 400") {
+			t.Errorf("exit %d; stderr:\n%s", code, stderr)
+		}
+		if n := h.fake.count(http.MethodGet, "/certificates/new-1"); n != 1 {
+			t.Errorf("polled %d times, want 1", n)
+		}
+	})
+}
+
+// TestPollingIncompleteResponses covers polling reads that get no complete
+// response, which are retried, and a complete but malformed one, which is
+// not.
+func TestPollingIncompleteResponses(t *testing.T) {
+	// failGets answers the first n GETs whose path ends in suffix with
+	// respond, once a request with method after has been seen. It returns a
+	// count of the GETs it answered.
+	failGets := func(h *harness, after, suffix string, n int, respond func(http.ResponseWriter)) func() int {
+		seen, failed := false, 0
+		h.fake.hook = func(w http.ResponseWriter, r *http.Request, _ []byte) bool {
+			if r.Method == after {
+				seen = true
+			}
+			if !seen || r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, suffix) || failed == n {
+				return false
+			}
+			failed++
+			respond(w)
+			return true
+		}
+		return func() int {
+			h.fake.mu.Lock()
+			defer h.fake.mu.Unlock()
+			return failed
+		}
+	}
+
+	for _, tt := range []struct {
+		name      string
+		setup     func(*testing.T) *harness
+		args      []string
+		after     string
+		afterPath string
+		suffix    string
+	}{
+		{"certificate", issueHarness, []string{"leaf", "issue"}, http.MethodPost, "/certificates", "/certificates/new-1"},
+		{"association", issueHarness, []string{"leaf", "issue"}, http.MethodPut, "/hostnames", "/hostnames/" + hostA},
+		{"deletion", pruneHarness, []string{"leaf", "prune", "--cert-id", "old", "--yes"}, http.MethodDelete, "/certificates/old", "/certificates/old"},
+	} {
+		t.Run(tt.name+" polling recovers from a cut-off body", func(t *testing.T) {
+			h := tt.setup(t)
+			h.waitLimit = 20
+			failed := failGets(h, tt.after, tt.suffix, 1, func(w http.ResponseWriter) { writeCutOff(t, w, http.StatusOK) })
+			code, _, stderr := h.run(tt.args...)
+			if code != 0 {
+				t.Fatalf("exit %d; stderr:\n%s", code, stderr)
+			}
+			if n := failed(); n != 1 {
+				t.Fatalf("cut off %d bodies, want 1", n)
+			}
+			// The cut-off read, then at least two polls to finish.
+			if n := countIn(requestsAfter(h.fake.recorded(), tt.after, tt.afterPath), http.MethodGet, tt.suffix); n < 3 {
+				t.Errorf("polled %d times after the %s, want the cut-off read retried", n, tt.after)
+			}
+		})
+	}
+
+	t.Run("certificate polling recovers from a reset connection", func(t *testing.T) {
+		h := issueHarness(t)
+		h.waitLimit = 20
+		// Go's transport resends an idempotent request when a reused
+		// connection closes before the response, so the fake resets twice
+		// to make sure aopctl sees the error.
+		failGets(h, http.MethodPost, "/certificates/new-1", 2, func(w http.ResponseWriter) { resetConnection(t, w) })
+		code, _, stderr := h.run("leaf", "issue")
+		if code != 0 {
+			t.Fatalf("exit %d; stderr:\n%s", code, stderr)
+		}
+		// One wait each for the certificate and the associations, plus the
+		// retry.
+		if h.waits < 3 {
+			t.Errorf("waited %d times, want a retry after the reset", h.waits)
+		}
+	})
+
+	t.Run("a malformed response fails at once", func(t *testing.T) {
+		h := issueHarness(t)
+		h.waitLimit = 20
+		failGets(h, http.MethodPost, "/certificates/new-1", 1, func(w http.ResponseWriter) {
+			writeRaw(w, http.StatusOK, "text/html", "<html>maintenance</html>")
+		})
+		code, _, stderr := h.run("leaf", "issue")
+		if code != 1 || !strings.Contains(stderr, `check certificate new-1: GET /zones/{zone}/origin_tls_client_auth/hostnames/certificates/new-1: HTTP 200: undecodable response (content type "text/html")`) {
 			t.Errorf("exit %d; stderr:\n%s", code, stderr)
 		}
 		if n := h.fake.count(http.MethodGet, "/certificates/new-1"); n != 1 {
@@ -1046,6 +1182,54 @@ func TestLeafPruneCompletion(t *testing.T) {
 		}
 		if d := deletes(h); strings.Join(d, ",") != "old,spare" {
 			t.Errorf("deleted %v, want old,spare", d)
+		}
+	})
+
+	t.Run("non-JSON 404 while deleting", func(t *testing.T) {
+		h := pruneHarness(t)
+		// After old's DELETE, an intermediary answers its GETs with an HTML
+		// 404. spare's GETs reach Cloudflare's own 404 once it is gone.
+		deleted := false
+		h.fake.hook = func(w http.ResponseWriter, r *http.Request, _ []byte) bool {
+			if !strings.HasSuffix(r.URL.Path, "/certificates/old") {
+				return false
+			}
+			if r.Method == http.MethodDelete {
+				deleted = true
+			}
+			if !deleted || r.Method != http.MethodGet {
+				return false
+			}
+			writeRaw(w, http.StatusNotFound, "text/html", "<html>Not Found</html>")
+			return true
+		}
+		code, _, stderr := h.run("leaf", "prune", "--cert-id", "old", "--cert-id", "spare", "--yes")
+		if code != 1 || !strings.Contains(stderr, `Failed old: check certificate: GET /zones/{zone}/origin_tls_client_auth/hostnames/certificates/old: HTTP 404: undecodable response (content type "text/html")`) {
+			t.Errorf("exit %d; stderr:\n%s", code, stderr)
+		}
+		if strings.Contains(stderr, "Deleted old") {
+			t.Errorf("an HTML 404 counted as deleted:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "Deleted spare") {
+			t.Errorf("a Cloudflare 404 did not count as deleted:\n%s", stderr)
+		}
+	})
+
+	t.Run("non-JSON 404 before deleting", func(t *testing.T) {
+		h := pruneHarness(t)
+		h.fake.hook = func(w http.ResponseWriter, r *http.Request, _ []byte) bool {
+			if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/certificates/old") {
+				return false
+			}
+			writeRaw(w, http.StatusNotFound, "text/html", "<html>Not Found</html>")
+			return true
+		}
+		code, _, stderr := h.run("leaf", "prune", "--cert-id", "old", "--yes")
+		if code != 1 || !strings.Contains(stderr, "read certificate old: ") || strings.Contains(stderr, "Refused old: not found") {
+			t.Errorf("exit %d; stderr:\n%s", code, stderr)
+		}
+		if d := deletes(h); len(d) != 0 {
+			t.Errorf("deleted %v", d)
 		}
 	})
 
