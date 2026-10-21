@@ -35,8 +35,9 @@ jobs:
           minimum_release_age: 3d
           # This job holds write credentials, so it never restores a cache.
           cache: false
-      # Runs before the App token exists, so the downloaded Traefik binary
-      # never shares a step with write credentials.
+      # Later steps in this job hold write credentials, so this step must not
+      # execute the Traefik or Yaegi binaries it downloads. canary:use only
+      # reads Traefik's build info.
       - name: Select the canary version
         id: select
         env:
@@ -46,14 +47,17 @@ jobs:
           mise run canary:use
           version="$(mise --env canary current github:traefik/traefik)"
           yaegi="$(mise --env canary current aqua:traefik/yaegi)"
+          newest="$(printf '%s\n' "$previous" "$version" | sort -V | tail -n 1)"
           {
             echo "previous=$previous"
             echo "version=$version"
             echo "yaegi=$yaegi"
-            if [[ "$version" == "$previous" ]]; then
-              echo "changed=false"
-            else
+            # Only move forward, so a canary moved past the cooldown by hand
+            # is never proposed for a downgrade.
+            if [[ "$version" != "$previous" && "$newest" == "$version" ]]; then
               echo "changed=true"
+            else
+              echo "changed=false"
             fi
           } >> "$GITHUB_OUTPUT"
           echo "Canary: Traefik $previous -> $version, Yaegi $yaegi" >> "$GITHUB_STEP_SUMMARY"
@@ -68,6 +72,7 @@ jobs:
           permission-pull-requests: write
       # sign-commits makes the commit through the GitHub API, so GitHub signs
       # it as the App; the repository requires signed commits on every branch.
+      # Each run resets the branch to its own commit, discarding others.
       - name: Open or update the pull request
         if: steps.select.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
@@ -85,3 +90,5 @@ jobs:
             Moves the Traefik compatibility canary from v${{ steps.select.outputs.previous }} to v${{ steps.select.outputs.version }}, the newest Traefik 3.x release outside the three-day cooldown, with the Yaegi CLI it embeds (v${{ steps.select.outputs.yaegi }}). `mise run canary:use` produced `mise.canary.toml` and `mise.canary.lock`.
 
             The `Traefik canary` workflow runs the full e2e suite against this version on this pull request. Merging only moves the canary; the supported baseline in `mise.lock` is unchanged.
+
+            The `Traefik canary bump` workflow owns this branch and replaces its commits on each run, so make any fixes in a separate pull request.

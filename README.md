@@ -824,9 +824,11 @@ The `Traefik canary bump` workflow moves the canary forward. Every Monday, and
 on manual dispatch from `main`, it runs `mise run canary:use`. When that selects
 a newer Traefik release, it opens or updates a pull request from the
 `canary/traefik-bump` branch, where the canary workflow tests the new version.
-It authenticates with the release-please GitHub App from the `release`
-environment, so GitHub signs the commit as the App and the pull request
-triggers CI.
+It authenticates as the release-please GitHub App from the `release`
+environment, so the pull request triggers CI, and it commits through the
+GitHub API, so GitHub signs the commit as the App. The workflow owns that
+branch and replaces its commits on each run, so make fixes for a new Traefik
+version in a separate pull request.
 
 To move the canary by hand, run `mise run canary:use` for the newest Traefik
 3.x release outside the cooldown, or pass a version, such as
@@ -853,8 +855,9 @@ requests trigger CI. The canary bump workflow uses the same environment and
 App. They need:
 
 - a GitHub App installed on this repository with read and write access to
-  contents, issues and pull requests, which the jobs request when they create
-  the App token; and
+  contents, issues and pull requests, which the release-please job requests
+  when it creates the App token, while the canary bump job requests only
+  contents and pull requests; and
 - a `release` environment with a deployment branch policy that allows only
   `main` and `release-*.x`, the App's client ID in the
   `RELEASE_PLEASE_GITHUB_CLIENT_ID` variable, and the App's private key in the
