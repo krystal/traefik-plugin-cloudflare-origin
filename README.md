@@ -186,6 +186,10 @@ entrypoint instance, that is every router on the entrypoint.
    or zone-level
    [Authenticated Origin Pulls](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/)
    certificate, and enable it for the hostnames that should use it.
+
+   For per-hostname AOP, [`aopctl`](#aopctl) does steps 1 and 2: `aopctl ca
+   create` creates the CA, and `aopctl leaf issue` issues, uploads and enables
+   a client certificate.
 3. Set the zone's SSL/TLS mode to Full (strict).
 4. Do not set Pseudo IPv4 to "Overwrite Headers". It replaces
    `CF-Connecting-IP` with a Class E address.
@@ -195,7 +199,8 @@ entrypoint instance, that is every router on the entrypoint.
    openssl x509 -in aop-ca.crt -noout -fingerprint -sha256
    ```
 
-   Use the value after `Fingerprint=`. Colons are fine.
+   Use the value after `Fingerprint=`. Colons are fine. `aopctl ca show`
+   prints the same value.
 
 ### Pin the CA or the client certificate
 
@@ -244,12 +249,17 @@ certificate the old CA signed.
    the file provider). Without this, Traefik rejects the new certificate during
    the TLS handshake, before the plugin can check it.
 2. List both the old and new fingerprints in `clientCertFingerprints`.
-3. Roll out the new client certificate in Cloudflare.
+3. Roll out the new client certificate in Cloudflare. With `aopctl`, create
+   the new CA with `aopctl ca create`, point `AOP_CA_CERT` and `AOP_CA_KEY` at
+   it, and follow the [leaf rotation runbook](#rotate-the-leaf-certificate).
+   `aopctl leaf prune` only deletes certificates signed by `AOP_CA_CERT`, so
+   prune the old CA's leaves with `AOP_CA_CERT` set to the old CA.
 4. Remove the old fingerprint and the old CA from Traefik, along with any
    `revokedCertFingerprints` entries for certificates the old CA signed.
 
 Rotating only the client certificate under an unchanged CA needs none of this
 when you pin the CA, but it does not revoke the old client certificate. See
+[Rotate the leaf certificate](#rotate-the-leaf-certificate) and
 [Revoke a leaked client certificate](#revoke-a-leaked-client-certificate).
 
 ## Install the plugin
@@ -751,6 +761,208 @@ spec:
       X-Cluster-Client-Ip: ""
 ```
 
+## aopctl
+
+`aopctl` is a command-line tool for the Cloudflare side of
+[Set up Cloudflare](#set-up-cloudflare), for per-hostname AOP. It creates a
+dedicated AOP client CA, issues leaf certificates from it, uploads them to
+Cloudflare, points hostnames at them, and deletes the ones you no longer use.
+Traefik never loads it, and it uses only the Go standard library.
+
+It does not manage zone-level AOP, DNS, zone settings or Traefik
+configuration. The one exception is `aopctl ca show --secret`, which prints
+the CA Secret from [example 1](#1-gate-one-service).
+
+### Install aopctl
+
+```sh
+go install github.com/krystal/traefik-plugin-cloudflare-origin/cmd/aopctl@latest
+```
+
+From a checkout of this repository, `go run ./cmd/aopctl` works too. While the
+repository is private, `go install` needs
+`GOPRIVATE=github.com/krystal/traefik-plugin-cloudflare-origin` and Git
+credentials for GitHub.
+
+### Configure aopctl
+
+`aopctl` reads secrets from environment variables and never writes a key to
+disk. It contains no 1Password code, but works well with `op run`: keep
+`op://` references in an env file, and run each `leaf` command through
+`op run --env-file`.
+
+```sh
+# aop.env
+AOP_CA_CERT=op://<vault>/<item>/ca_cert
+AOP_CA_KEY=op://<vault>/<item>/ca_key
+CLOUDFLARE_API_TOKEN=op://<vault>/<token item>/credential
+CLOUDFLARE_ZONE_ID=<zone ID>
+AOP_HOSTNAMES=app.example.com,admin.example.com
+```
+
+```sh
+op run --env-file aop.env -- aopctl leaf status
+```
+
+| Variable               | Used by                                                                     |
+| ---------------------- | --------------------------------------------------------------------------- |
+| `AOP_CA_CERT`          | `leaf issue`, `leaf associate` and `leaf prune`; optional for `leaf status` |
+| `AOP_CA_KEY`           | `leaf issue`, as a PKCS#8 PEM                                               |
+| `CLOUDFLARE_API_TOKEN` | every `leaf` command                                                        |
+| `CLOUDFLARE_ZONE_ID`   | every `leaf` command                                                        |
+| `AOP_HOSTNAMES`        | every `leaf` command, comma- or whitespace-separated                        |
+
+`AOP_HOSTNAMES` must list every hostname this CA serves in the zone.
+Cloudflare has no API that lists all hostname associations, so `aopctl` only
+sees the hostnames you list. Repeated `--hostname` flags replace the variable.
+A certificate can serve at most 100 hostnames.
+
+Create the API token with the **Zone > SSL and Certificates > Edit**
+permission for the zone. `leaf status` only needs Read, but every other `leaf`
+command writes. Account-owned tokens work. They fail Cloudflare's token verify
+endpoint, which `aopctl` does not use.
+
+### Commands
+
+| Command                              | What it does                                                                    |
+| ------------------------------------ | ------------------------------------------------------------------------------- |
+| `aopctl ca create`                   | Create a CA and print a 1Password item template                                 |
+| `aopctl ca show`                     | Describe the CA certificate on stdin, or print it as a Kubernetes Secret        |
+| `aopctl leaf issue`                  | Issue a leaf, upload it and point the listed hostnames at it                    |
+| `aopctl leaf associate --cert-id ID` | Point the listed hostnames at an existing leaf, to resume or roll back an issue |
+| `aopctl leaf status`                 | List the zone's hostname certificates and the listed hostnames' associations    |
+| `aopctl leaf prune --cert-id ID...`  | Delete the named certificates after checking that no listed hostname uses them  |
+
+Run `aopctl <command> -h` for each command's flags. `aopctl` exits with 0 on
+success, 1 on errors and 2 on usage errors.
+
+`aopctl ca create` makes an EC P-256 key (`--key-type rsa-3072` for RSA) and a
+CA certificate valid for 3650 days (`--days`). The CA can sign leaves only:
+CA:TRUE with a path length of 0, certificate and CRL signing, and no extended
+key usage. It writes a 1Password item template to stdout, with the fields
+`ca_cert`, `ca_key` (concealed) and `fingerprint_sha256`, and the fingerprint
+to stderr. It needs no secrets, so run it outside `op run` and pipe it
+straight into 1Password. It refuses to write to a terminal.
+
+```sh
+aopctl ca create --name "Example AOP CA" | op item create --vault <vault> -
+```
+
+`aopctl ca show` reads the CA certificate from stdin, not from the
+environment, because `op run` masks secret values in a command's output,
+including the certificate. It prints the fingerprint to pin, the validity and
+the key type, and warns when the certificate does not match the CA profile.
+With `--secret` it prints only the Secret:
+
+```sh
+op read "op://<vault>/<item>/ca_cert" | aopctl ca show
+op read "op://<vault>/<item>/ca_cert" | aopctl ca show --secret cloudflare-aop-ca --namespace app
+```
+
+`aopctl leaf issue` issues an EC P-256 leaf (`--key-type rsa-3072` for RSA)
+for client authentication, valid for 365 days (`--days`). Before it writes
+anything, it checks that the zone has a free certificate slot (Cloudflare
+allows 10) and reads each hostname's association. It refuses a hostname whose
+association is disabled, since someone turned AOP off for it on purpose. It
+then uploads the leaf, waits for Cloudflare to report it `active`, points all
+listed hostnames at it in one request, and waits until each association is
+`active`. `--dry-run` prints the plan and changes nothing. The leaf key is
+only ever sent in the upload request. `leaf issue` never deletes a
+certificate.
+
+`aopctl leaf prune` deletes only the certificates named with `--cert-id`. It
+refuses a certificate that is not signed by `AOP_CA_CERT` or that a listed
+hostname uses, and checks the listed hostnames again just before each delete.
+It shows a preview and asks for confirmation on the terminal, through
+`/dev/tty` so the prompt works under `op run`, unless you pass `--yes`. A
+certificate already being deleted is waited for, not deleted again.
+
+`leaf issue`, `leaf associate` and `leaf prune` poll every 5 seconds within a
+total budget for the whole command, `--timeout`, which defaults to 10
+minutes. When the budget runs out, they report the last state they saw.
+
+### Rotate the leaf certificate
+
+The plugin pins the CA, so rotating the leaf needs no Traefik change.
+
+1. Preview the rotation, and check the hostnames and the certificates they
+   use now:
+
+   ```sh
+   op run --env-file aop.env -- aopctl leaf issue --dry-run
+   ```
+
+2. Issue and roll out the new leaf:
+
+   ```sh
+   op run --env-file aop.env -- aopctl leaf issue
+   ```
+
+   It prints the certificates the listed hostnames no longer use, and the
+   `aopctl leaf prune` command that deletes them.
+3. Check the result with `aopctl leaf status`, and check that requests through
+   Cloudflare still reach the backend with the client IP, for example in the
+   [access log](#access-logs).
+4. Prune the old certificates soon, with the printed command:
+
+   ```sh
+   op run --env-file aop.env -- aopctl leaf prune --cert-id <old ID> --hostname <hostname>...
+   ```
+
+   Cloudflare's documentation says that when several certificates exist, "the
+   most recently deployed certificate will be the one enabled and used". That
+   conflicts with choosing a certificate per hostname, so do not keep old
+   certificates around.
+
+An `active` status in the API does not prove which certificate Cloudflare
+presents to your origin. Before the first production rollout, check it
+against a staging origin: pin the new leaf's fingerprint, which `leaf issue`
+prints, instead of the CA's on a staging hostname. Requests through
+Cloudflare then pass only when Cloudflare presents the new leaf.
+
+### Recover or roll back
+
+If `leaf issue` fails after the upload, it prints the new certificate's ID,
+each hostname's original and observed association, and the commands to
+continue or undo the rollout:
+
+- To resume, run the printed
+  `aopctl leaf associate --cert-id <new ID> --hostname ...` command.
+- To roll back, run the printed `aopctl leaf associate` commands, one per
+  certificate the hostnames used before, each listing only that certificate's
+  hostnames.
+- `aopctl` never voids an association, so for hostnames that had none, it
+  prints the API request that voids the new one. You can also remove it in
+  the Cloudflare dashboard.
+
+  ```text
+  PUT /zones/{zone}/origin_tls_client_auth/hostnames
+  {"config":[{"hostname":"<hostname>","cert_id":"<new ID>","enabled":null}]}
+  ```
+
+None of these needs a free certificate slot. `leaf associate` only accepts an
+`active` certificate signed by `AOP_CA_CERT`, and `--dry-run` previews it.
+
+If the upload fails without a usable response, for example on a timeout,
+`leaf issue` reports that the outcome is unknown. Cloudflare may have created
+the certificate, so run `aopctl leaf status` before you retry.
+
+### If a leaf key leaks
+
+Deleting a leaf from Cloudflare does not revoke it. Anyone with its key can
+still connect to the origin directly until it expires or you revoke it, as
+[Revoke a leaked client certificate](#revoke-a-leaked-client-certificate)
+describes. With `aopctl`:
+
+1. Note the leaked leaf's ID and fingerprint, which `aopctl leaf status`
+   prints.
+2. Issue a new leaf with `aopctl leaf issue`.
+3. Add the leaked leaf's fingerprint to `revokedCertFingerprints`, and keep
+   the entry until the leaf expires.
+4. Delete the leaked leaf with `aopctl leaf prune --cert-id <ID>`.
+
+If the CA key leaks, [rotate the CA](#rotate-the-ca).
+
 ## Development
 
 Tools and tasks are managed with [mise](https://mise.jdx.dev). `mise.toml` pins
@@ -793,6 +1005,11 @@ in Traefik v3.7) and its Go 1.22 standard library: no generics, no `slices`,
 or `clear` builtins, and no goroutines. `test:yaegi` is only meaningful while
 the Yaegi CLI matches Traefik's interpreter, so the e2e suite fails if the
 locked Yaegi CLI differs from the Yaegi version built into the locked Traefik.
+
+These limits do not apply to `cmd/aopctl`, which Traefik never loads. It
+shares `go.mod` with the plugin, though, so it must use only the standard
+library and Go 1.22 language features. A test fails if `go.mod` gains a
+`require` directive.
 
 ### Dependency updates
 
