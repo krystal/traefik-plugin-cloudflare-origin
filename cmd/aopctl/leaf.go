@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -66,6 +68,17 @@ func validHostname(host string) bool {
 		}
 	}
 	return true
+}
+
+var certIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
+
+// validateCertID keeps a --cert-id from changing the request path.
+// Cloudflare's certificate IDs are UUIDs.
+func validateCertID(id string) error {
+	if !certIDPattern.MatchString(id) {
+		return usagef("invalid --cert-id %q: want a Cloudflare certificate ID", id)
+	}
+	return nil
 }
 
 func requireHostnames(hosts []string) error {
@@ -155,26 +168,49 @@ func certSignedBy(cert *cfCert, ca *x509.Certificate) (*x509.Certificate, error)
 	return parsed, nil
 }
 
+// otherCANote precedes a printed command for certificates AOP_CA_CERT did
+// not sign, which leaf associate and leaf prune refuse.
+func otherCANote(ids []string) string {
+	return fmt.Sprintf("AOP_CA_CERT did not sign %s, so run the next command with AOP_CA_CERT set to the CA that did. During a CA rotation, that is the old CA.", strings.Join(ids, ", "))
+}
+
+// isTransient reports whether a polling read may succeed if retried: HTTP
+// 429, a 5xx, or a transport error. Callers check the budget first.
+func isTransient(err error) bool {
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.status == http.StatusTooManyRequests || apiErr.status >= 500 ||
+		(apiErr.status == 0 && apiErr.err != nil)
+}
+
 // waitForCert polls an uploaded certificate until it is active.
 func (a *app) waitForCert(ctx context.Context, cf *cfClient, id string) error {
-	last := "unknown"
+	last := "last status unknown"
+	timedOut := func() error {
+		return fmt.Errorf("timed out waiting for certificate %s to become active: %s", id, last)
+	}
 	for {
 		cert, err := cf.getCert(ctx, id)
-		if err != nil {
-			if ctx.Err() != nil {
-				return fmt.Errorf("timed out waiting for certificate %s to become active: last status %s", id, last)
+		switch {
+		case err == nil:
+			last = "last status " + cert.Status
+			switch cert.Status {
+			case statusActive:
+				return nil
+			case statusDeploymentTimedOut, statusDeletionTimedOut, statusPendingDeletion, statusDeleted:
+				return fmt.Errorf("certificate %s is %s", id, cert.Status)
 			}
+		case ctx.Err() != nil:
+			return timedOut()
+		case isTransient(err):
+			last = "last error: " + err.Error()
+		default:
 			return fmt.Errorf("check certificate %s: %w", id, err)
 		}
-		last = cert.Status
-		switch cert.Status {
-		case statusActive:
-			return nil
-		case statusDeploymentTimedOut, statusDeletionTimedOut, statusPendingDeletion, statusDeleted:
-			return fmt.Errorf("certificate %s is %s", id, cert.Status)
-		}
 		if a.wait(ctx, pollInterval) != nil {
-			return fmt.Errorf("timed out waiting for certificate %s to become active: last status %s", id, last)
+			return timedOut()
 		}
 	}
 }
@@ -183,18 +219,28 @@ func (a *app) waitForCert(ctx context.Context, cf *cfClient, id string) error {
 // recording what it sees in observed.
 func (a *app) waitForAssociations(ctx context.Context, cf *cfClient, id string, hosts []string, observed map[string]*association) error {
 	pending := hosts
+	// lastErr holds a hostname's transient read error, if its last read failed.
+	lastErr := map[string]error{}
 	for {
 		var still []string
 		for _, h := range pending {
 			assoc, err := cf.getAssociation(ctx, h)
 			if err != nil {
 				if ctx.Err() != nil {
-					return associationTimeout(id, pending, observed)
+					return associationTimeout(id, pending, observed, lastErr)
 				}
-				return fmt.Errorf("check association for %s: %w", h, err)
+				if !isTransient(err) {
+					return fmt.Errorf("check association for %s: %w", h, err)
+				}
+				lastErr[h] = err
+				still = append(still, h)
+				continue
 			}
+			delete(lastErr, h)
 			observed[h] = assoc
-			if assoc != nil && strings.HasSuffix(assoc.Status, "_timed_out") {
+			// A timed-out association still on another certificate has not
+			// switched yet.
+			if assoc != nil && assoc.CertID == id && strings.HasSuffix(assoc.Status, "_timed_out") {
 				return fmt.Errorf("association for %s is %s", h, assoc.Status)
 			}
 			if assoc == nil || assoc.CertID != id || assoc.Status != statusActive {
@@ -206,16 +252,18 @@ func (a *app) waitForAssociations(ctx context.Context, cf *cfClient, id string, 
 			return nil
 		}
 		if a.wait(ctx, pollInterval) != nil {
-			return associationTimeout(id, pending, observed)
+			return associationTimeout(id, pending, observed, lastErr)
 		}
 	}
 }
 
-func associationTimeout(id string, pending []string, observed map[string]*association) error {
+func associationTimeout(id string, pending []string, observed map[string]*association, lastErr map[string]error) error {
 	states := make([]string, len(pending))
 	for i, h := range pending {
 		state := "unknown"
-		if assoc, ok := observed[h]; ok {
+		if err := lastErr[h]; err != nil {
+			state = "error: " + err.Error()
+		} else if assoc, ok := observed[h]; ok {
 			state = describeAssociation(assoc)
 		}
 		states[i] = h + ": " + state
@@ -291,6 +339,12 @@ func (a *app) leafIssue(args []string) error {
 	if len(certs) >= maxZoneCerts {
 		return fmt.Errorf("the zone has %d hostname certificates, Cloudflare's limit is %d: delete unused ones first (see aopctl leaf status and aopctl leaf prune)", len(certs), maxZoneCerts)
 	}
+	signed := map[string]bool{}
+	for i := range certs {
+		if _, err := certSignedBy(&certs[i], caCert); err == nil {
+			signed[certs[i].ID] = true
+		}
+	}
 	original, err := readAssociations(ctx, cf, hosts)
 	if err != nil {
 		return err
@@ -313,32 +367,39 @@ func (a *app) leafIssue(args []string) error {
 		return nil
 	}
 
-	uploaded, err := cf.uploadCert(ctx, encodeCertPEM(leaf), leafKeyPEM)
+	newID, err := cf.uploadCert(ctx, encodeCertPEM(leaf), leafKeyPEM)
 	var apiErr *apiError
-	if errors.As(err, &apiErr) && !apiErr.decoded {
+	// A 2xx response that could not be read may still have created a
+	// certificate.
+	if errors.As(err, &apiErr) && (!apiErr.decoded || apiErr.status >= 200 && apiErr.status <= 299) {
 		return fmt.Errorf("upload outcome unknown: %w: a certificate may have been created, so run aopctl leaf status before retrying", err)
 	}
 	if err != nil {
 		return fmt.Errorf("upload failed: %w", err)
 	}
-	if uploaded.ID == "" {
+	if newID == "" {
 		return errors.New("upload outcome unknown: the response has no certificate ID, so run aopctl leaf status before retrying")
 	}
-	fmt.Fprintf(a.stderr, "Uploaded certificate %s, waiting for it to become active.\n", uploaded.ID)
+	fmt.Fprintf(a.stderr, "Uploaded certificate %s, waiting for it to become active.\n", newID)
 
-	r := &rollout{certID: uploaded.ID, hosts: hosts, original: original, observed: map[string]*association{}}
+	r := &rollout{certID: newID, hosts: hosts, original: original, observed: map[string]*association{}, signed: signed}
 	if err := a.rollOut(ctx, cf, r); err != nil {
 		r.report(a.stderr)
 		return err
 	}
 
-	fmt.Fprintf(a.stdout, "The listed hostnames now use certificate %s.\n", uploaded.ID)
-	var oldIDs []string
+	fmt.Fprintf(a.stdout, "The listed hostnames now use certificate %s.\n", newID)
+	var oldIDs, ownIDs, otherIDs []string
 	seen := map[string]bool{}
 	for _, h := range hosts {
-		if id := inUseCertID(original[h]); id != "" && id != uploaded.ID && !seen[id] {
+		if id := inUseCertID(original[h]); id != "" && id != newID && !seen[id] {
 			seen[id] = true
 			oldIDs = append(oldIDs, id)
+			if signed[id] {
+				ownIDs = append(ownIDs, id)
+			} else {
+				otherIDs = append(otherIDs, id)
+			}
 		}
 	}
 	if len(oldIDs) == 0 {
@@ -347,7 +408,13 @@ func (a *app) leafIssue(args []string) error {
 	}
 	fmt.Fprintf(a.stdout, "They no longer use: %s\n", strings.Join(oldIDs, ", "))
 	fmt.Fprintln(a.stdout, "Delete those soon. Cloudflare's docs leave open which certificate a hostname uses while several exist:")
-	fmt.Fprintf(a.stdout, "  aopctl leaf prune --cert-id %s%s\n", strings.Join(oldIDs, " --cert-id "), hostnameFlags(hosts))
+	if len(ownIDs) > 0 {
+		fmt.Fprintf(a.stdout, "  aopctl leaf prune --cert-id %s%s\n", strings.Join(ownIDs, " --cert-id "), hostnameFlags(hosts))
+	}
+	if len(otherIDs) > 0 {
+		fmt.Fprintf(a.stdout, "  %s\n", otherCANote(otherIDs))
+		fmt.Fprintf(a.stdout, "  aopctl leaf prune --cert-id %s%s\n", strings.Join(otherIDs, " --cert-id "), hostnameFlags(hosts))
+	}
 	return nil
 }
 
@@ -360,6 +427,8 @@ type rollout struct {
 	// observed holds the last association read for each hostname. A
 	// missing hostname is unknown.
 	observed map[string]*association
+	// signed records which listed certificates AOP_CA_CERT signed.
+	signed map[string]bool
 }
 
 func (a *app) rollOut(ctx context.Context, cf *cfClient, r *rollout) error {
@@ -412,6 +481,9 @@ func (r *rollout) report(w io.Writer) {
 	}
 	fmt.Fprintln(w, "To roll back, run:")
 	for _, id := range oldIDs {
+		if !r.signed[id] {
+			fmt.Fprintf(w, "  %s\n", otherCANote([]string{id}))
+		}
 		fmt.Fprintf(w, "  aopctl leaf associate --cert-id %s%s\n", id, hostnameFlags(byID[id]))
 	}
 	if len(unassociated) > 0 {
@@ -437,6 +509,9 @@ func (a *app) leafAssociate(args []string) error {
 	}
 	if strings.TrimSpace(*certID) == "" {
 		return usagef("--cert-id is required")
+	}
+	if err := validateCertID(*certID); err != nil {
+		return err
 	}
 	if err := validateTimeout(*timeout); err != nil {
 		return err
@@ -610,7 +685,10 @@ func (a *app) leafPrune(args []string) error {
 	seen := map[string]bool{}
 	for _, id := range idFlags {
 		id = strings.TrimSpace(id)
-		if id != "" && !seen[id] {
+		if err := validateCertID(id); err != nil {
+			return err
+		}
+		if !seen[id] {
 			seen[id] = true
 			ids = append(ids, id)
 		}
@@ -750,27 +828,32 @@ func (a *app) leafPrune(args []string) error {
 
 // waitForDeletion polls until the certificate is gone or deleted.
 func (a *app) waitForDeletion(ctx context.Context, cf *cfClient, id string) error {
-	last := "unknown"
+	last := "last status unknown"
+	timedOut := func() error {
+		return fmt.Errorf("timed out waiting for the delete to finish: %s", last)
+	}
 	for {
 		cert, err := cf.getCert(ctx, id)
-		if isNotFound(err) {
+		switch {
+		case isNotFound(err):
 			return nil
-		}
-		if err != nil {
-			if ctx.Err() != nil {
-				return fmt.Errorf("timed out waiting for the delete to finish: last status %s", last)
+		case err == nil:
+			last = "last status " + cert.Status
+			switch cert.Status {
+			case statusDeleted:
+				return nil
+			case statusDeletionTimedOut:
+				return fmt.Errorf("the delete failed at Cloudflare: status %s", cert.Status)
 			}
+		case ctx.Err() != nil:
+			return timedOut()
+		case isTransient(err):
+			last = "last error: " + err.Error()
+		default:
 			return fmt.Errorf("check certificate: %w", err)
 		}
-		last = cert.Status
-		switch cert.Status {
-		case statusDeleted:
-			return nil
-		case statusDeletionTimedOut:
-			return fmt.Errorf("the delete failed at Cloudflare: status %s", cert.Status)
-		}
 		if a.wait(ctx, pollInterval) != nil {
-			return fmt.Errorf("timed out waiting for the delete to finish: last status %s", last)
+			return timedOut()
 		}
 	}
 }
@@ -784,7 +867,11 @@ func (a *app) confirm(prompt string) (bool, error) {
 	defer tty.Close()
 	fmt.Fprint(tty, prompt)
 	line, err := bufio.NewReader(tty).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
+	// EOF before a newline aborts, whatever was typed.
+	if errors.Is(err, io.EOF) {
+		return false, nil
+	}
+	if err != nil {
 		return false, fmt.Errorf("read confirmation: %w", err)
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))

@@ -476,11 +476,12 @@ func TestUsageErrors(t *testing.T) {
 	for i := range hosts {
 		hosts[i] = fmt.Sprintf("h%d.example.com", i)
 	}
-	tests := []struct {
+	type usageTest struct {
 		name string
 		args []string
 		env  string
-	}{
+	}
+	tests := []usageTest{
 		{"ca key type", []string{"ca", "create", "--key-type", "ed25519"}, ""},
 		{"leaf key type", []string{"leaf", "issue", "--key-type", "rsa-2048", "--hostname", "a.example.com"}, ""},
 		{"ca days zero", []string{"ca", "create", "--days", "0"}, ""},
@@ -492,6 +493,12 @@ func TestUsageErrors(t *testing.T) {
 		{"101 hostname flags", append([]string{"leaf", "issue", "--dry-run"}, hostnameArgs(hosts)...), ""},
 		{"associate without cert id", []string{"leaf", "associate", "--hostname", "a.example.com"}, ""},
 		{"invalid hostname", []string{"leaf", "status", "--hostname", "*.example.com"}, ""},
+	}
+	for _, id := range []string{".", "..", "a/b", ""} {
+		tests = append(tests,
+			usageTest{"associate cert id " + strconv.Quote(id), []string{"leaf", "associate", "--cert-id", id, "--hostname", "a.example.com"}, ""},
+			usageTest{"prune cert id " + strconv.Quote(id), []string{"leaf", "prune", "--cert-id", id, "--cert-id", "old", "--yes", "--hostname", "a.example.com"}, ""},
+		)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

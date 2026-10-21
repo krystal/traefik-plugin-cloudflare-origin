@@ -252,8 +252,9 @@ certificate the old CA signed.
 3. Roll out the new client certificate in Cloudflare. With `aopctl`, create
    the new CA with `aopctl ca create`, point `AOP_CA_CERT` and `AOP_CA_KEY` at
    it, and follow the [leaf rotation runbook](#rotate-the-leaf-certificate).
-   `aopctl leaf prune` only deletes certificates signed by `AOP_CA_CERT`, so
-   prune the old CA's leaves with `AOP_CA_CERT` set to the old CA.
+   `aopctl leaf associate` and `aopctl leaf prune` only accept certificates
+   signed by `AOP_CA_CERT`, so roll back to, or prune, the old CA's leaves
+   with `AOP_CA_CERT` set to the old CA.
 4. Remove the old fingerprint and the old CA from Traefik, along with any
    `revokedCertFingerprints` entries for certificates the old CA signed.
 
@@ -942,6 +943,9 @@ continue or undo the rollout:
 
 None of these needs a free certificate slot. `leaf associate` only accepts an
 `active` certificate signed by `AOP_CA_CERT`, and `--dry-run` previews it.
+During a [CA rotation](#rotate-the-ca), the hostnames' original certificates
+are the old CA's, so run the rollback commands with `AOP_CA_CERT` set to the
+old CA. `leaf issue` marks each command that needs this.
 
 If the upload fails without a usable response, for example on a timeout,
 `leaf issue` reports that the outcome is unknown. Cloudflare may have created

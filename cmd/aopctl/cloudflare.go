@@ -288,13 +288,17 @@ func (c *cfClient) getCert(ctx context.Context, id string) (*cfCert, error) {
 	return &cert, nil
 }
 
-func (c *cfClient) uploadCert(ctx context.Context, certPEM, keyPEM string) (*cfCert, error) {
+// uploadCert returns the new certificate's ID. It decodes nothing else, so
+// drift in other fields cannot hide the ID.
+func (c *cfClient) uploadCert(ctx context.Context, certPEM, keyPEM string) (string, error) {
 	body := map[string]string{"certificate": certPEM, "private_key": keyPEM}
-	var cert cfCert
-	if _, err := c.do(ctx, http.MethodPost, certsPath, nil, body, &cert); err != nil {
-		return nil, err
+	var cert struct {
+		ID string `json:"id"`
 	}
-	return &cert, nil
+	if _, err := c.do(ctx, http.MethodPost, certsPath, nil, body, &cert); err != nil {
+		return "", err
+	}
+	return cert.ID, nil
 }
 
 func (c *cfClient) deleteCert(ctx context.Context, id string) error {
