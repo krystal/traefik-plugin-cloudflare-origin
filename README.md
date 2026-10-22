@@ -1,4 +1,16 @@
+<div align="center">
+
 # traefik-plugin-cloudflare-origin
+
+**Authenticate Cloudflare-proxied requests and forward their real client IP.**
+
+[![GitHub Release](https://img.shields.io/github/v/release/krystal/traefik-plugin-cloudflare-origin?logo=github&label=Release)](https://github.com/krystal/traefik-plugin-cloudflare-origin/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/krystal/traefik-plugin-cloudflare-origin/ci.yml?branch=main&logo=github&label=CI)](https://github.com/krystal/traefik-plugin-cloudflare-origin/actions/workflows/ci.yml)
+[![GitHub Issues](https://img.shields.io/github/issues/krystal/traefik-plugin-cloudflare-origin?logo=github&label=Issues)](https://github.com/krystal/traefik-plugin-cloudflare-origin/issues)
+[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/krystal/traefik-plugin-cloudflare-origin?logo=github&label=PRs)](https://github.com/krystal/traefik-plugin-cloudflare-origin/pulls)
+[![License](https://img.shields.io/github/license/krystal/traefik-plugin-cloudflare-origin?label=License)](https://github.com/krystal/traefik-plugin-cloudflare-origin/blob/main/LICENSE)
+
+</div>
 
 A Traefik v3 middleware plugin for origins behind Cloudflare's proxy. For
 requests that present a pinned Cloudflare Authenticated Origin Pulls (AOP)
