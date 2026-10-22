@@ -299,31 +299,42 @@ skips every router that uses the middleware.
 
 Pin the release and the SHA-256 of its archive in your Helm values:
 
+<!-- x-release-please-start-version -->
+
 ```yaml
 experimental:
   abortOnPluginFailure: true
   plugins:
     traefik-plugin-cloudflare-origin:
       moduleName: github.com/krystal/traefik-plugin-cloudflare-origin
-      version: v0.1.0 # x-release-please-version
+      version: v0.1.0
       hash: <SHA-256 of the release archive>
 ```
+
+<!-- x-release-please-end -->
 
 Traefik computes the SHA-256 of the archive it downloads and refuses to install
 the plugin when it differs from `hash`. To get the value, download the same
 archive from plugins.traefik.io and hash it:
 
+<!-- x-release-please-start-version -->
+
 ```sh
-version=v0.1.0 # x-release-please-version
-curl -fsSL "https://plugins.traefik.io/public/download/github.com/krystal/traefik-plugin-cloudflare-origin/$version" | sha256sum
+version=v0.1.0
+curl -fsSL -o plugin.zip \
+  "https://plugins.traefik.io/public/download/github.com/krystal/traefik-plugin-cloudflare-origin/$version" &&
+  sha256sum plugin.zip
 ```
 
-Use the hex digest it prints (`shasum -a 256` replaces `sha256sum` on macOS).
-The download works only once the catalog lists the release. The catalog polls
-GitHub once a day, so a new release can take a day to appear. To upgrade,
-change `version` and `hash` together.
+<!-- x-release-please-end -->
 
-`hash` needs Traefik v3.6 or later. Leave it out on older versions.
+Use the hex digest it prints (`shasum -a 256` replaces `sha256sum` on macOS).
+The download works only once the catalog lists the release. Until then, curl
+fails and nothing is hashed. The catalog polls GitHub once a day, so a new
+release can take a day to appear. To upgrade, change `version` and `hash`
+together.
+
+`hash` needs Traefik v3.5.3 or later. Leave it out on older versions.
 
 ### Inline source in Helm values
 
