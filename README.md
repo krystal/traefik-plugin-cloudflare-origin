@@ -281,17 +281,20 @@ With the Traefik Helm chart 41.1.1 you can install the plugin in three ways:
 - **Inline source** (`inlinePlugin`): the files live in your Helm values, and
   the chart mounts them from a ConfigMap. Upgrades are a reviewable diff in
   your values, and Traefik needs no network access to load the plugin.
-- **Fetched at startup** (`localPath`): an init container clones a pinned
-  release into a volume. Your values stay small, but every new Traefik pod
-  needs to reach GitHub, and a failed fetch keeps the pod from starting.
+- **From a container image** (`localPath`): Kubernetes mounts a release
+  image as a volume, or an init container copies the files out of it. Your
+  values stay small and pin the image by digest, and the kubelet pulls it like
+  any other image, so a failed pull keeps the pod from starting.
 
 The last two load it as a local plugin: Traefik must find the three plugin
 files, `.traefik.yml`, `go.mod` and `cloudflare_origin.go`, in
 `/plugins-local/src/github.com/krystal/traefik-plugin-cloudflare-origin`. Use
 one of them in air-gapped clusters, or when Traefik must not depend on
-plugins.traefik.io to start. Of the two, use inline source unless the values
-size or copy step is a problem. The chart mounts the ConfigMap flat, which is
-why the plugin's files sit at the root of this repository.
+plugins.traefik.io to start. Inline source needs nothing outside your values.
+The container image keeps the values small, and in an air-gapped cluster you
+mirror it into your own registry, as you do Traefik's image. The chart mounts
+the ConfigMap flat, which is why the plugin's files sit at the root of this
+repository.
 
 Set `experimental.abortOnPluginFailure: true` with every option. If the plugin
 then fails to load, Traefik refuses to start instead of starting without the
@@ -385,33 +388,93 @@ helm upgrade --install traefik traefik/traefik --version 41.1.1 \
   --set-file 'experimental.localPlugins.traefik-plugin-cloudflare-origin.source.cloudflare_origin\.go=cloudflare_origin.go'
 ```
 
-### Fetched at startup
+### From a container image
 
-An init container clones the release tag and checks that it points at the
-commit you expect, so a moved tag fails the pod instead of loading different
-code. Replace `<tag>` and `<commit SHA>` with a release and its full commit
-SHA, and pin the `alpine/git` image to a tag and digest you trust.
+Every release after v0.1.0 publishes an image for linux/amd64 and linux/arm64
+to `ghcr.io/krystal/traefik-plugin-cloudflare-origin`, tagged with the release
+version. The image is built from `scratch`, and its root holds only the three
+plugin files, `LICENSE`, and `copy-plugin`, the static binary the init
+container runs. Traefik ignores the two extra files: Yaegi loads only `.go`
+files, and Traefik reads `.traefik.yml` by name.
+
+Pin the image by digest, so a moved tag cannot change what Traefik loads. This
+prints the digest of a release's multi-arch image:
+
+<!-- x-release-please-start-version -->
+
+```sh
+docker buildx imagetools inspect --format '{{.Manifest.Digest}}' \
+  ghcr.io/krystal/traefik-plugin-cloudflare-origin:v0.1.0
+```
+
+<!-- x-release-please-end -->
+
+Use the `sha256:...` value it prints in place of `<digest>` below. Each image
+also has a GitHub build provenance attestation, which records the workflow run
+and commit that built it. To check it with the GitHub CLI:
+
+<!-- x-release-please-start-version -->
+
+```sh
+gh attestation verify \
+  oci://ghcr.io/krystal/traefik-plugin-cloudflare-origin:v0.1.0 --owner krystal
+```
+
+<!-- x-release-please-end -->
+
+To upgrade, change the tag and the digest together.
+
+#### As an image volume
+
+This is the simpler mode: Kubernetes mounts the image read-only as the plugin
+directory, and nothing is copied. It needs:
+
+- Kubernetes v1.35 or later, where
+  [image volumes](https://kubernetes.io/docs/tasks/configure-pod-container/image-volumes/)
+  are enabled by default. They are stable from v1.36. In v1.33 and v1.34 they
+  are beta but off by default, behind the `ImageVolume` feature gate.
+- A container runtime that supports image volumes, such as containerd v2.1.0
+  or later, or CRI-O v1.31 or later.
+
+<!-- x-release-please-start-version -->
+
+```yaml
+deployment:
+  additionalVolumes:
+    - name: cloudflare-origin
+      image:
+        reference: ghcr.io/krystal/traefik-plugin-cloudflare-origin:v0.1.0@sha256:<digest>
+        pullPolicy: IfNotPresent
+
+experimental:
+  abortOnPluginFailure: true
+  localPlugins:
+    traefik-plugin-cloudflare-origin:
+      moduleName: github.com/krystal/traefik-plugin-cloudflare-origin
+      mountPath: /plugins-local/src/github.com/krystal/traefik-plugin-cloudflare-origin
+      type: localPath
+      volumeName: cloudflare-origin
+```
+
+<!-- x-release-please-end -->
+
+The kubelet pulls the image when the pod starts, with the same credentials as
+container images, and the pod does not start until the pull succeeds.
+
+#### As an init container
+
+On clusters without image volumes, an init container runs `copy-plugin` from
+the image. It copies the three plugin files into an `emptyDir`, which the
+chart then mounts at the plugin path:
+
+<!-- x-release-please-start-version -->
 
 ```yaml
 deployment:
   initContainers:
-    - name: fetch-cloudflare-origin
-      image: alpine/git:<tag>@sha256:<digest>
-      env:
-        - name: HOME
-          value: /tmp
-        - name: PLUGIN_TAG
-          value: <tag>
-        - name: PLUGIN_COMMIT
-          value: <commit SHA>
-      command: [sh, -euc]
-      args:
-        - |
-          git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$PLUGIN_TAG" \
-            https://github.com/krystal/traefik-plugin-cloudflare-origin.git /tmp/src
-          cd /tmp/src
-          test "$(git rev-parse HEAD)" = "$PLUGIN_COMMIT"
-          cp .traefik.yml go.mod cloudflare_origin.go /plugin/
+    - name: copy-cloudflare-origin
+      image: ghcr.io/krystal/traefik-plugin-cloudflare-origin:v0.1.0@sha256:<digest>
+      args: [/destination]
       securityContext:
         allowPrivilegeEscalation: false
         capabilities:
@@ -419,13 +482,9 @@ deployment:
         readOnlyRootFilesystem: true
       volumeMounts:
         - name: cloudflare-origin
-          mountPath: /plugin
-        - name: cloudflare-origin-tmp
-          mountPath: /tmp
+          mountPath: /destination
   additionalVolumes:
     - name: cloudflare-origin
-      emptyDir: {}
-    - name: cloudflare-origin-tmp
       emptyDir: {}
 
 experimental:
@@ -438,9 +497,13 @@ experimental:
       volumeName: cloudflare-origin
 ```
 
-The init container runs as the chart's non-root pod user, so its writable
-paths are the two `emptyDir` volumes. `HOME` points at one of them because Git
-writes there.
+<!-- x-release-please-end -->
+
+`copy-plugin` takes the destination directory as its only argument, so keep
+the argument and the `mountPath` the same. It checks that all three files exist
+before it writes, overwrites the copies from an earlier run of the same pod,
+and fails the pod when the destination is missing. It runs as the chart's
+non-root pod user and needs no network access or writable root filesystem.
 
 ## Deployment preconditions
 
@@ -842,11 +905,12 @@ younger than three days, and CI applies the same cooldown to the mise binary.
 | `mise run test:yaegi`   | The same unit tests under the Yaegi CLI                                     |
 | `mise run e2e`          | End-to-end tests against the locked Traefik binary, standard and fast proxy |
 | `mise run e2e:canary`   | The same end-to-end tests against the canary Traefik in `mise.canary.toml`  |
+| `mise run image:test`   | Build and check the container image for amd64 and arm64; needs Docker       |
 | `mise run canary:use`   | Pin the canary to a Traefik release and its Yaegi, and lock both            |
 | `mise run pin:actions`  | Pin GitHub Actions to full commit SHAs                                      |
 
-CI runs `lint`, `format:check`, `test`, `test:yaegi` and `e2e` as separate
-jobs.
+CI runs `lint`, `format:check`, `test`, `test:yaegi`, `e2e` and `image:test`
+as separate jobs.
 
 [^1]: zizmor runs its online audits, such as `known-vulnerable-actions`, only
     when `GH_TOKEN` or `GITHUB_TOKEN` is set, as in CI, and runs offline
@@ -869,9 +933,11 @@ locked Yaegi CLI differs from the Yaegi version built into the locked Traefik.
 
 ### Dependency updates
 
-Dependabot updates GitHub Actions weekly with a three-day cooldown, and
-`lint:pinact` rejects action pins younger than three days. To update tools,
-run `mise upgrade` (which respects the cooldown), then
+Dependabot updates GitHub Actions and the `Dockerfile`'s Go builder image
+weekly with a three-day cooldown, and `lint:pinact` rejects action pins younger
+than three days. Dependabot does not update the BuildKit image pinned in
+`.github/workflows/image.yml`; the comment beside it explains how to bump it.
+To update tools, run `mise upgrade` (which respects the cooldown), then
 `mise lock --platform linux-x64,linux-arm64,macos-arm64`. When Traefik moves
 to a new Yaegi version, update `aqua:traefik/yaegi` in the same change.
 
@@ -918,7 +984,8 @@ claims support.
 release pull request from the [Conventional Commits](https://www.conventionalcommits.org)
 on `main`, configured in `.github/release-please-config.json`. Merging it tags
 the release (`vX.Y.Z`), creates the GitHub release, and updates `CHANGELOG.md`
-and the `version` lines in [From the Plugin Catalog](#from-the-plugin-catalog).
+and the versions in [From the Plugin Catalog](#from-the-plugin-catalog) and
+[From a container image](#from-a-container-image).
 The first release is `v0.1.0`. Before 1.0.0, breaking changes bump the minor
 version, and `feat` and `fix` commits bump the patch version.
 
@@ -939,6 +1006,18 @@ App. They need:
   `main` and `release-*.x`, the App's client ID in the
   `RELEASE_PLEASE_GITHUB_CLIENT_ID` variable, and the App's private key in the
   `RELEASE_PLEASE_GITHUB_APP_PRIVATE_KEY` secret.
+
+Publishing the release starts the `Container image` workflow
+(`.github/workflows/image.yml`). It builds the image for linux/amd64 and
+linux/arm64 from the release tag, pushes it to GHCR as
+`ghcr.io/krystal/traefik-plugin-cloudflare-origin:vX.Y.Z`, and attests its
+build provenance. It fails before pushing when the tag is not `vX.Y.Z`, and it
+uses no caches, so nothing from CI runs reaches the image. It authenticates
+with the workflow's `GITHUB_TOKEN` and needs no secrets.
+
+GHCR creates the package as private on its first push. Once the first image is
+published, make the package public in its package settings so clusters can
+pull it without credentials. The organization must allow public packages.
 
 ## License
 
