@@ -6,6 +6,7 @@
       "release-type": "go",
       "initial-version": "0.1.0",
       "changelog-path": "CHANGELOG.md",
+      "extra-files": ["README.md"],
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true,
       "draft": false,

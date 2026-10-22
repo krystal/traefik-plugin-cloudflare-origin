@@ -260,28 +260,79 @@ when you pin the CA, but it does not revoke the old client certificate. See
 
 ## Install the plugin
 
-Traefik loads this plugin as a local plugin: Traefik must find the three plugin
-files, `.traefik.yml`, `go.mod` and `cloudflare_origin.go`, in
-`/plugins-local/src/github.com/krystal/traefik-plugin-cloudflare-origin`. With
-the Traefik Helm chart 41.1.1 you can provide them in two ways:
+With the Traefik Helm chart 41.1.1 you can install the plugin in three ways:
 
+- **From the Plugin Catalog** (`experimental.plugins`): Traefik downloads the
+  release from plugins.traefik.io. This needs the least configuration, but
+  every new Traefik pod downloads the plugin, so pod startup depends on
+  plugins.traefik.io being reachable.
 - **Inline source** (`inlinePlugin`): the files live in your Helm values, and
   the chart mounts them from a ConfigMap. Upgrades are a reviewable diff in
-  your values, and Traefik needs no network access to load the plugin. Use this
-  unless the values size or copy step is a problem.
+  your values, and Traefik needs no network access to load the plugin.
 - **Fetched at startup** (`localPath`): an init container clones a pinned
   release into a volume. Your values stay small, but every new Traefik pod
   needs to reach GitHub, and a failed fetch keeps the pod from starting.
 
-The chart mounts the ConfigMap flat, which is why the plugin's files sit at the
-root of this repository.
+The last two load it as a local plugin: Traefik must find the three plugin
+files, `.traefik.yml`, `go.mod` and `cloudflare_origin.go`, in
+`/plugins-local/src/github.com/krystal/traefik-plugin-cloudflare-origin`. Use
+one of them in air-gapped clusters, or when Traefik must not depend on
+plugins.traefik.io to start. Of the two, use inline source unless the values
+size or copy step is a problem. The chart mounts the ConfigMap flat, which is
+why the plugin's files sit at the root of this repository.
 
-Set `experimental.abortOnPluginFailure: true` either way. If the plugin then
-fails to load, Traefik refuses to start instead of starting without the plugin
-and skipping every router that uses it.
+Set `experimental.abortOnPluginFailure: true` with every option. If the plugin
+then fails to load, Traefik refuses to start instead of starting without the
+plugin and skipping every router that uses it.
 
-The middleware examples below refer to the plugin by the name used here,
-`cloudflare-origin`.
+The examples register the plugin as `traefik-plugin-cloudflare-origin`, the
+name the [Traefik Plugin Catalog](https://plugins.traefik.io) uses in its
+configuration snippets. You can choose another name, but two keys must match:
+the plugin's key under `experimental.plugins` (or `experimental.localPlugins`)
+in the static configuration, and the key under `plugin` in every middleware
+that uses it. When they differ, Traefik logs `unknown plugin type: <name>` and
+skips every router that uses the middleware.
+
+### From the Plugin Catalog
+
+Pin the release and the SHA-256 of its archive in your Helm values:
+
+<!-- x-release-please-start-version -->
+
+```yaml
+experimental:
+  abortOnPluginFailure: true
+  plugins:
+    traefik-plugin-cloudflare-origin:
+      moduleName: github.com/krystal/traefik-plugin-cloudflare-origin
+      version: v0.1.0
+      hash: <SHA-256 of the release archive>
+```
+
+<!-- x-release-please-end -->
+
+Traefik computes the SHA-256 of the archive it downloads and refuses to install
+the plugin when it differs from `hash`. To get the value, download the same
+archive from plugins.traefik.io and hash it:
+
+<!-- x-release-please-start-version -->
+
+```sh
+version=v0.1.0
+curl -fsSL -o plugin.zip \
+  "https://plugins.traefik.io/public/download/github.com/krystal/traefik-plugin-cloudflare-origin/$version" &&
+  sha256sum plugin.zip
+```
+
+<!-- x-release-please-end -->
+
+Use the hex digest it prints (`shasum -a 256` replaces `sha256sum` on macOS).
+The download works only once the catalog lists the release. Until then, curl
+fails and nothing is hashed. The catalog polls GitHub once a day, so a new
+release can take a day to appear. To upgrade, change `version` and `hash`
+together.
+
+`hash` needs Traefik v3.5.3 or later. Leave it out on older versions.
 
 ### Inline source in Helm values
 
@@ -293,7 +344,7 @@ This works with any Helm-based deployment, including Argo CD and Flux.
 experimental:
   abortOnPluginFailure: true
   localPlugins:
-    cloudflare-origin:
+    traefik-plugin-cloudflare-origin:
       moduleName: github.com/krystal/traefik-plugin-cloudflare-origin
       mountPath: /plugins-local/src/github.com/krystal/traefik-plugin-cloudflare-origin
       type: inlinePlugin
@@ -317,9 +368,9 @@ without `source`:
 ```sh
 helm upgrade --install traefik traefik/traefik --version 41.1.1 \
   --namespace traefik --values values.yaml \
-  --set-file 'experimental.localPlugins.cloudflare-origin.source.\.traefik\.yml=.traefik.yml' \
-  --set-file 'experimental.localPlugins.cloudflare-origin.source.go\.mod=go.mod' \
-  --set-file 'experimental.localPlugins.cloudflare-origin.source.cloudflare_origin\.go=cloudflare_origin.go'
+  --set-file 'experimental.localPlugins.traefik-plugin-cloudflare-origin.source.\.traefik\.yml=.traefik.yml' \
+  --set-file 'experimental.localPlugins.traefik-plugin-cloudflare-origin.source.go\.mod=go.mod' \
+  --set-file 'experimental.localPlugins.traefik-plugin-cloudflare-origin.source.cloudflare_origin\.go=cloudflare_origin.go'
 ```
 
 ### Fetched at startup
@@ -368,7 +419,7 @@ deployment:
 experimental:
   abortOnPluginFailure: true
   localPlugins:
-    cloudflare-origin:
+    traefik-plugin-cloudflare-origin:
       moduleName: github.com/krystal/traefik-plugin-cloudflare-origin
       mountPath: /plugins-local/src/github.com/krystal/traefik-plugin-cloudflare-origin
       type: localPath
@@ -416,9 +467,9 @@ Check these before you deploy. The plugin cannot detect most of them.
 ## Kubernetes examples
 
 The examples use the `traefik.io/v1alpha1` CRDs and the plugin name
-`cloudflare-origin` from [Install the plugin](#install-the-plugin). Replace
-`AB:CD:...:EF` with your CA's fingerprint, and the hostnames and CIDRs with
-your own.
+`traefik-plugin-cloudflare-origin` from
+[Install the plugin](#install-the-plugin). Replace `AB:CD:...:EF` with your
+CA's fingerprint, and the hostnames and CIDRs with your own.
 
 ### 1. Gate one service
 
@@ -460,7 +511,7 @@ metadata:
   namespace: app
 spec:
   plugin:
-    cloudflare-origin:
+    traefik-plugin-cloudflare-origin:
       clientCertFingerprints:
         - "AB:CD:...:EF" # SHA-256 of your AOP CA certificate
       protectAllHosts: true
@@ -524,7 +575,7 @@ metadata:
   namespace: www
 spec:
   plugin:
-    cloudflare-origin:
+    traefik-plugin-cloudflare-origin:
       clientCertFingerprints:
         - "AB:CD:...:EF"
 ---
@@ -571,7 +622,7 @@ metadata:
   namespace: traefik
 spec:
   plugin:
-    cloudflare-origin:
+    traefik-plugin-cloudflare-origin:
       clientCertFingerprints:
         - "AB:CD:...:EF"
       protectedHosts:
@@ -649,17 +700,21 @@ Otherwise Traefik skips the routers that reference it until it appears.
 
 ## File provider
 
-The same configuration works with the file provider. Traefik loads local
-plugins from `plugins-local/src/<moduleName>` under its working directory, so
-copy the three plugin files into
-`plugins-local/src/github.com/krystal/traefik-plugin-cloudflare-origin`.
+The same configuration works with the file provider. To install from the
+catalog, put the `experimental.plugins` block from
+[From the Plugin Catalog](#from-the-plugin-catalog) in the static
+configuration. For a local plugin, Traefik loads it from
+`plugins-local/src/<moduleName>` under its working directory, so copy the three
+plugin files into
+`plugins-local/src/github.com/krystal/traefik-plugin-cloudflare-origin` and use
+`experimental.localPlugins`:
 
 ```yaml
 # Static configuration
 experimental:
   abortOnPluginFailure: true
   localPlugins:
-    cloudflare-origin:
+    traefik-plugin-cloudflare-origin:
       moduleName: github.com/krystal/traefik-plugin-cloudflare-origin
 ```
 
@@ -669,7 +724,7 @@ http:
   middlewares:
     cloudflare-origin:
       plugin:
-        cloudflare-origin:
+        traefik-plugin-cloudflare-origin:
           clientCertFingerprints: ["AB:CD:...:EF"]
           protectAllHosts: true
           directAccessCIDRs: ["198.51.100.0/24"]
@@ -850,9 +905,13 @@ claims support.
 [release-please](https://github.com/googleapis/release-please) maintains a
 release pull request from the [Conventional Commits](https://www.conventionalcommits.org)
 on `main`, configured in `.github/release-please-config.json`. Merging it tags
-the release (`vX.Y.Z`), creates the GitHub release and updates `CHANGELOG.md`.
+the release (`vX.Y.Z`), creates the GitHub release, and updates `CHANGELOG.md`
+and the `version` lines in [From the Plugin Catalog](#from-the-plugin-catalog).
 The first release is `v0.1.0`. Before 1.0.0, breaking changes bump the minor
 version, and `feat` and `fix` commits bump the patch version.
+
+Every tag must be a `v`-prefixed semantic version such as `v1.2.3`. The Traefik
+Plugin Catalog rejects the plugin if any tag in the repository is not.
 
 The release-please job runs last in CI, only after every other job passes on a
 push to `main` or a `release-X.Y.x` maintenance branch. It runs in the
