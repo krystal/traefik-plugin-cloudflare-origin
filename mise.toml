@@ -85,6 +85,73 @@ run = "go test -tags e2e -count=1 -v ./e2e/"
 description = "Run end-to-end tests against the canary Traefik and Yaegi in mise.canary.toml"
 run = "mise --env canary run e2e"
 
+[tasks."image:test"]
+description = "Build and check the container image for amd64 and arm64, and run it on the native platform"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+tag=traefik-plugin-cloudflare-origin:image-test
+plugin_files=(.traefik.yml go.mod cloudflare_origin.go)
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"; docker image rm "$tag" >/dev/null 2>&1 || true' EXIT
+
+fail() {
+  echo "image:test: $*" >&2
+  exit 1
+}
+
+# Lists a directory's entries, one per line, in a locale-independent order.
+entries() {
+  (cd "$1" && find . -mindepth 1 | LC_ALL=C sort)
+}
+
+# One platform per build, because the docker driver with the classic image
+# store cannot export or load a multi-platform image.
+for platform in linux/amd64 linux/arm64; do
+  arch="${platform#linux/}"
+  out="$tmp/$arch"
+  docker buildx build --platform "$platform" --output "type=local,dest=$out" .
+
+  [[ "$(entries "$out")" == "$(printf './%s\n' "${plugin_files[@]}" LICENSE copy-plugin | LC_ALL=C sort)" ]] ||
+    fail "$platform: unexpected image contents: $(entries "$out" | tr '\n' ' ')"
+  for f in "${plugin_files[@]}" LICENSE; do
+    cmp "$f" "$out/$f" || fail "$platform: $f differs from the repository"
+    [[ -n "$(find "$out/$f" -perm 0644)" ]] || fail "$platform: $f mode is not 0644"
+  done
+  [[ -n "$(find "$out/copy-plugin" -perm 0755)" ]] || fail "$platform: copy-plugin mode is not 0755"
+  buildinfo="$(go version -m "$out/copy-plugin")"
+  [[ "$buildinfo"$'\n' == *$'\tGOARCH='"$arch"$'\n'* ]] || fail "$platform: copy-plugin is not built for $arch"
+done
+
+# mise renders run scripts as Tera templates, so raw blocks protect the Go
+# templates that docker's --format takes.
+native="$(docker version --format '{% raw %}{{.Server.Os}}/{{.Server.Arch}}{% endraw %}')"
+case "$native" in
+  linux/amd64 | linux/arm64) ;;
+  *) fail "unsupported Docker server platform $native" ;;
+esac
+docker buildx build --platform "$native" --load --tag "$tag" .
+
+user="$(docker image inspect --format '{% raw %}{{.Config.User}}{% endraw %}' "$tag")"
+[[ "$user" == 65532:65532 ]] || fail "image user is ${user:-empty}, want 65532:65532"
+
+# A 0777 directory stands in for an emptyDir that the pod user can write to.
+dest="$tmp/dest"
+mkdir -m 0777 "$dest"
+docker run --rm --read-only --network none --volume "$dest:/destination" "$tag" /destination
+[[ "$(entries "$dest")" == "$(printf './%s\n' "${plugin_files[@]}" | LC_ALL=C sort)" ]] ||
+  fail "unexpected copied files: $(entries "$dest" | tr '\n' ' ')"
+for f in "${plugin_files[@]}"; do
+  cmp "$f" "$dest/$f" || fail "copied $f differs from the repository"
+done
+[[ -z "$(find "$dest" -mindepth 1 ! -user 65532)" ]] || fail "copied files are not owned by uid 65532"
+
+if docker run --rm --read-only --network none "$tag" /missing; then
+  fail "copy-plugin succeeded with a missing destination"
+fi
+echo "image:test: ok"
+'''
+
 [tasks."canary:use"]
 description = "Pin the canary to a Traefik release and its embedded Yaegi, and lock both"
 usage = '''

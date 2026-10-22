@@ -1,0 +1,7 @@
+# Allowlist: the image needs only the plugin files, the license and the copier.
+*
+!.traefik.yml
+!go.mod
+!cloudflare_origin.go
+!LICENSE
+!cmd/copy-plugin/
