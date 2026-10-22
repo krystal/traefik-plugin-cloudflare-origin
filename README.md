@@ -68,8 +68,6 @@ certificate. Cloudflare documents that such a Worker can set the
 including one in your pod network that applications treat as internal. Only
 give Worker access to people you would trust to set the client IP.
 
-To report a vulnerability in the plugin, see [SECURITY.md](SECURITY.md).
-
 ## How it works
 
 Two pieces of Traefik configuration work together:
