@@ -187,10 +187,9 @@ entrypoint instance, that is every router on the entrypoint.
    [Authenticated Origin Pulls](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/)
    certificate, and enable it for the hostnames that should use it.
 
-   For per-hostname AOP, [`aopctl`](https://github.com/krystal/aopctl) is an
-   optional companion tool that automates steps 1 and 2. It creates the CA,
-   and issues, uploads and associates a client certificate for the hostnames.
-   The plugin does not need it.
+   [`aopctl`](https://github.com/krystal/aopctl) is an optional companion tool
+   that automates steps 1 and 2. It creates the CA, and issues, uploads and
+   enables client certificates. The plugin does not need it.
 3. Set the zone's SSL/TLS mode to Full (strict).
 4. Do not set Pseudo IPv4 to "Overwrite Headers". It replaces
    `CF-Connecting-IP` with a Class E address.
