@@ -99,10 +99,26 @@ jobs:
           minimum_release_age: 3d
       - run: mise run e2e
 
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          github_token: ${{ github.token }}
+          # Apply the project's three-day cooldown to mise itself.
+          minimum_release_age: 3d
+      - run: mise run image:test
+
   release-please:
     name: Release Please
     runs-on: ubuntu-latest
-    needs: [lint, format, test, test-yaegi, e2e]
+    needs: [lint, format, test, test-yaegi, e2e, image]
     # Keeps pull request and feature-branch runs out of the release
     # environment. This is only a filter: anyone who can push a branch can
     # edit it, so the environment's deployment branch policy is what

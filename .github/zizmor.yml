@@ -5,7 +5,9 @@ rules:
       days: 3
   cache-poisoning:
     ignore:
-      # The release-please job only tags the tested commit and publishes no
-      # artifacts built in CI, so a poisoned tool cache cannot reach a release.
-      # Revisit if ci.yml ever builds or uploads release artifacts.
+      # ci.yml publishes nothing: the image job builds a throwaway test image,
+      # and the release-please job only tags the tested commit. image.yml
+      # builds the release image from the tag without caches, so a poisoned
+      # tool cache cannot reach a release. Revisit if ci.yml ever publishes or
+      # uploads artifacts.
       - ci.yml
