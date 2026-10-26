@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.1](https://github.com/krystal/traefik-plugin-cloudflare-origin/compare/v0.1.0...v0.1.1) (2026-10-26)
+
+
+### Features
+
+* publish the plugin as a container image ([#17](https://github.com/krystal/traefik-plugin-cloudflare-origin/issues/17)) ([a0a5759](https://github.com/krystal/traefik-plugin-cloudflare-origin/commit/a0a575984bdd3cb711aa6d6ab20afbdd43587b20))
+
+
+### Miscellaneous Chores
+
+* **deps:** bump golang from 1.26.9-alpine to 1.27.3-alpine ([#19](https://github.com/krystal/traefik-plugin-cloudflare-origin/issues/19)) ([324823a](https://github.com/krystal/traefik-plugin-cloudflare-origin/commit/324823a12992905da02398cf31476e31f6bc2b2a))
+
 ## 0.1.0 (2026-10-22)
 
 
