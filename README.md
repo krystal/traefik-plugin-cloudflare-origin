@@ -320,7 +320,7 @@ experimental:
   plugins:
     traefik-plugin-cloudflare-origin:
       moduleName: github.com/krystal/traefik-plugin-cloudflare-origin
-      version: v0.1.0
+      version: v0.1.1
       hash: <SHA-256 of the release archive>
 ```
 
@@ -333,7 +333,7 @@ archive from plugins.traefik.io and hash it:
 <!-- x-release-please-start-version -->
 
 ```sh
-version=v0.1.0
+version=v0.1.1
 curl -fsSL -o plugin.zip \
   "https://plugins.traefik.io/public/download/github.com/krystal/traefik-plugin-cloudflare-origin/$version" &&
   sha256sum plugin.zip
@@ -404,7 +404,7 @@ prints the digest of a release's multi-arch image:
 
 ```sh
 docker buildx imagetools inspect --format '{{.Manifest.Digest}}' \
-  ghcr.io/krystal/traefik-plugin-cloudflare-origin:v0.1.0
+  ghcr.io/krystal/traefik-plugin-cloudflare-origin:v0.1.1
 ```
 
 <!-- x-release-please-end -->
@@ -417,7 +417,7 @@ and commit that built it. To check it with the GitHub CLI:
 
 ```sh
 gh attestation verify \
-  oci://ghcr.io/krystal/traefik-plugin-cloudflare-origin:v0.1.0 --owner krystal
+  oci://ghcr.io/krystal/traefik-plugin-cloudflare-origin:v0.1.1 --owner krystal
 ```
 
 <!-- x-release-please-end -->
@@ -443,7 +443,7 @@ deployment:
   additionalVolumes:
     - name: cloudflare-origin
       image:
-        reference: ghcr.io/krystal/traefik-plugin-cloudflare-origin:v0.1.0@sha256:<digest>
+        reference: ghcr.io/krystal/traefik-plugin-cloudflare-origin:v0.1.1@sha256:<digest>
         pullPolicy: IfNotPresent
 
 experimental:
@@ -473,7 +473,7 @@ chart then mounts at the plugin path:
 deployment:
   initContainers:
     - name: copy-cloudflare-origin
-      image: ghcr.io/krystal/traefik-plugin-cloudflare-origin:v0.1.0@sha256:<digest>
+      image: ghcr.io/krystal/traefik-plugin-cloudflare-origin:v0.1.1@sha256:<digest>
       args: [/destination]
       securityContext:
         allowPrivilegeEscalation: false
