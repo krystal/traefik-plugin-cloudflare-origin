@@ -20,20 +20,20 @@ url = "https://github.com/traefik/yaegi/releases/download/v0.16.1/yaegi_v0.16.1_
 url_api = "https://api.github.com/repos/traefik/yaegi/releases/assets/160116355"
 
 [[tools."github:traefik/traefik"]]
-version = "3.7.15"
+version = "3.7.16"
 backend = "github:traefik/traefik"
 
 [tools."github:traefik/traefik"."platforms.linux-arm64"]
-checksum = "sha256:1866d8e831b95d14b599bb59eb20d2033b979c0cb1e347b48a0866a9b810454e"
-url = "https://github.com/traefik/traefik/releases/download/v3.7.15/traefik_v3.7.15_linux_arm64.tar.gz"
-url_api = "https://api.github.com/repos/traefik/traefik/releases/assets/644160564"
+checksum = "sha256:8f9463a7dd3a618569aaa46e19500331d7374a2e6f6ee300a50df5bb49132e1a"
+url = "https://github.com/traefik/traefik/releases/download/v3.7.16/traefik_v3.7.16_linux_arm64.tar.gz"
+url_api = "https://api.github.com/repos/traefik/traefik/releases/assets/659679942"
 
 [tools."github:traefik/traefik"."platforms.linux-x64"]
-checksum = "sha256:5b9f51199fcb7a3b5f7ae0f9dae8dcf01efadafd92c5fca96ea2822eca81f8e6"
-url = "https://github.com/traefik/traefik/releases/download/v3.7.15/traefik_v3.7.15_linux_amd64.tar.gz"
-url_api = "https://api.github.com/repos/traefik/traefik/releases/assets/644160289"
+checksum = "sha256:759a7bc0d66b74c588255ed9e41c7f9d4aba60bdb7bce9dde551b1268a55eb07"
+url = "https://github.com/traefik/traefik/releases/download/v3.7.16/traefik_v3.7.16_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/traefik/traefik/releases/assets/659679828"
 
 [tools."github:traefik/traefik"."platforms.macos-arm64"]
-checksum = "sha256:402f59cef47bbba629dda7ee34e99897648634fac8dc020fb992a7cdb034d323"
-url = "https://github.com/traefik/traefik/releases/download/v3.7.15/traefik_v3.7.15_darwin_arm64.tar.gz"
-url_api = "https://api.github.com/repos/traefik/traefik/releases/assets/644160094"
+checksum = "sha256:cddf264830889c27afe774dbc1c39559c749a99bc69322ba0073ec0af01ca59d"
+url = "https://github.com/traefik/traefik/releases/download/v3.7.16/traefik_v3.7.16_darwin_arm64.tar.gz"
+url_api = "https://api.github.com/repos/traefik/traefik/releases/assets/659679653"
