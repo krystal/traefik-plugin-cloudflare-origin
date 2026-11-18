@@ -3,5 +3,5 @@
 # Change them with `mise run canary:use [version]`, not by hand: the Yaegi CLI
 # must match the Yaegi version built into this Traefik binary.
 [tools]
-"aqua:traefik/yaegi" = "0.16.1"
-"github:traefik/traefik" = "3.7.16"
+"aqua:traefik/yaegi" = "0.16.3"
+"github:traefik/traefik" = "3.7.18"
