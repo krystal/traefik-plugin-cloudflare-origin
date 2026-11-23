@@ -22,22 +22,22 @@ url = "https://github.com/traefik/yaegi/releases/download/v0.16.3/yaegi_v0.16.3_
 url_api = "https://api.github.com/repos/traefik/yaegi/releases/assets/713124533"
 
 [[tools."github:traefik/traefik"]]
-version = "3.7.18"
+version = "3.7.19"
 backend = "github:traefik/traefik"
 
 [tools."github:traefik/traefik"."platforms.linux-arm64"]
-checksum = "sha256:cf3711fe64e1c229a1b1c50836f2a5db735a700b3fa5c4bc69fe0602fa0e9506"
+checksum = "sha256:6d796c41b8d3c8c31bb2faf1bfff1b5fcf603676ad9a773b29ffa7efa678881a"
 checksum_source = "mise-versions"
-url = "https://github.com/traefik/traefik/releases/download/v3.7.18/traefik_v3.7.18_linux_arm64.tar.gz"
-url_api = "https://api.github.com/repos/traefik/traefik/releases/assets/730670909"
+url = "https://github.com/traefik/traefik/releases/download/v3.7.19/traefik_v3.7.19_linux_arm64.tar.gz"
+url_api = "https://api.github.com/repos/traefik/traefik/releases/assets/743079236"
 
 [tools."github:traefik/traefik"."platforms.linux-x64"]
-checksum = "sha256:bc7e1e520c2d628b784e4e9c19bb259914082d5a70a27d509911caac5df18091"
-url = "https://github.com/traefik/traefik/releases/download/v3.7.18/traefik_v3.7.18_linux_amd64.tar.gz"
-url_api = "https://api.github.com/repos/traefik/traefik/releases/assets/730670771"
+checksum = "sha256:97534a68335a087137d0f2adecefe37c8216ac10114dc7e5b510f2a8a12f89be"
+url = "https://github.com/traefik/traefik/releases/download/v3.7.19/traefik_v3.7.19_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/traefik/traefik/releases/assets/743079138"
 
 [tools."github:traefik/traefik"."platforms.macos-arm64"]
-checksum = "sha256:7856e7a6d07d7ae8d22c6c8ce5f6831b03d2cbabf3fa23a07c5c74812000130e"
+checksum = "sha256:0d4fd0c847332cb91e520a86b69efe4fde59b7d2c12c90f28c6e2af712ccb845"
 checksum_source = "mise-versions"
-url = "https://github.com/traefik/traefik/releases/download/v3.7.18/traefik_v3.7.18_darwin_arm64.tar.gz"
-url_api = "https://api.github.com/repos/traefik/traefik/releases/assets/730670654"
+url = "https://github.com/traefik/traefik/releases/download/v3.7.19/traefik_v3.7.19_darwin_arm64.tar.gz"
+url_api = "https://api.github.com/repos/traefik/traefik/releases/assets/743079002"
